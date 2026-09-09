@@ -240,6 +240,18 @@ describe('Interactive Web Inspector & MCP Autocomplete Protocol (Item #7)', () =
       expect(html).toContain('/inspect/api/tools/');
       expect(html).toContain('/inspect/api/resources/read');
       expect(html).toContain('/inspect/api/prompts/get');
+
+      // Verify EUIX XML well-formedness: no naked colons in attributes without namespaces, no unescaped ampersands
+      const specMatch = html.match(/<uid_spec>[\s\S]*?<\/uid_spec>/);
+      expect(specMatch).not.toBeNull();
+      const xmlSpec = specMatch![0];
+      // Must not contain invalid unescaped & in text content
+      const withoutCdata = xmlSpec.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+      expect(withoutCdata).not.toMatch(/&(?!amp;|lt;|gt;|quot;|apos;|#\d+;)/);
+      // Navigation tabs use valid SET_STATE action tags
+      expect(xmlSpec).toContain('<path>activeTab</path>');
+      expect(xmlSpec).toContain('<value>tools</value>');
+      expect(xmlSpec).not.toContain('on_click:set');
     });
 
     it('returns full system metadata and registry state at GET /inspect/api/state', async () => {

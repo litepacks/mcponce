@@ -637,7 +637,8 @@ export async function runOpenApiServer(specPathOrUrl: string, flags: string[]) {
     port: isNaN(port) ? 3000 : port
   });
 
-  const count = await app.fromOpenApi(specPathOrUrl, { prefix });
+  const tools = await app.fromOpenApi(specPathOrUrl, { prefix });
+  const count = Array.isArray(tools) ? tools.length : tools;
   console.log(`\x1b[32m✔\x1b[0m Loaded and registered \x1b[1m${count}\x1b[0m tools from OpenAPI specification.`);
 
   const res = await app.start({ background: false });

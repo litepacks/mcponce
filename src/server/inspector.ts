@@ -153,16 +153,32 @@ export function createInspectorHtml(serverName: string, version: string): string
 
       <!-- Navigation Tabs -->
       <nav class="flex items-center gap-1.5">
-        <button on_click:set="activeTab='tools'" class="px-3 py-1.5 rounded-lg text-xs font-medium transition-all {data.activeTab == 'tools' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}">
+        <button class="px-3 py-1.5 rounded-lg text-xs font-medium transition-all {data.activeTab == 'tools' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}">
+          <on_click action="SET_STATE">
+            <path>activeTab</path>
+            <value>tools</value>
+          </on_click>
           Tools <span class="ml-1 px-1.5 py-0.2 rounded bg-slate-950/60 text-[10px] font-mono">{data.tools.length}</span>
         </button>
-        <button on_click:set="activeTab='resources'" class="px-3 py-1.5 rounded-lg text-xs font-medium transition-all {data.activeTab == 'resources' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}">
+        <button class="px-3 py-1.5 rounded-lg text-xs font-medium transition-all {data.activeTab == 'resources' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}">
+          <on_click action="SET_STATE">
+            <path>activeTab</path>
+            <value>resources</value>
+          </on_click>
           Resources <span class="ml-1 px-1.5 py-0.2 rounded bg-slate-950/60 text-[10px] font-mono">{data.resources.length}</span>
         </button>
-        <button on_click:set="activeTab='prompts'" class="px-3 py-1.5 rounded-lg text-xs font-medium transition-all {data.activeTab == 'prompts' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}">
+        <button class="px-3 py-1.5 rounded-lg text-xs font-medium transition-all {data.activeTab == 'prompts' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}">
+          <on_click action="SET_STATE">
+            <path>activeTab</path>
+            <value>prompts</value>
+          </on_click>
           Prompts <span class="ml-1 px-1.5 py-0.2 rounded bg-slate-950/60 text-[10px] font-mono">{data.prompts.length}</span>
         </button>
-        <button on_click:set="activeTab='metrics'" class="px-3 py-1.5 rounded-lg text-xs font-medium transition-all {data.activeTab == 'metrics' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}">
+        <button class="px-3 py-1.5 rounded-lg text-xs font-medium transition-all {data.activeTab == 'metrics' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}">
+          <on_click action="SET_STATE">
+            <path>activeTab</path>
+            <value>metrics</value>
+          </on_click>
           Metrics
         </button>
         <div class="h-4 w-px bg-slate-800 mx-1"></div>
@@ -511,7 +527,7 @@ export function createInspectorHtml(serverName: string, version: string): string
         <!-- Metrics Detail Panel -->
         <div class="{data.activeTab == 'metrics' ? 'flex flex-col gap-6' : 'hidden'}">
           <div class="pb-4 border-b border-slate-800">
-            <div class="text-xs text-slate-400 font-mono">Telemetry & Health</div>
+            <div class="text-xs text-slate-400 font-mono">Telemetry &amp; Health</div>
             <h2 class="text-xl font-bold text-white mt-0.5">Live Server Metrics</h2>
           </div>
 
