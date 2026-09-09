@@ -1,0 +1,61 @@
+{
+  "name": "mcponce",
+  "version": "0.1.0",
+  "description": "Cross-platform single-executable MCP server framework powered by Hono and the official Model Context Protocol SDK",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "mcponce": "./dist/cli/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "bench": "vitest bench --run",
+    "docs:dev": "docboot docs",
+    "docs:build": "docboot build docs",
+    "docs:doctor": "docboot doctor docs",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "hono",
+    "stdio",
+    "streamable-http",
+    "single-instance",
+    "cross-platform"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "hono": "^4.7.4",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "@vitest/coverage-v8": "^3.2.7",
+    "docboot": "^0.3.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "unitup": "^0.2.0",
+    "vitest": "^3.0.8"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

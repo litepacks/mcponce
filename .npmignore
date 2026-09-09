@@ -1,0 +1,36 @@
+# Source & Development
+src/
+test/
+bench/
+examples/
+
+# Documentation & Site builds
+docs/
+docs-dist/
+.docboot/
+docboot.config.*
+
+# Configuration
+tsconfig.json
+vitest.config.ts
+
+# Test & Coverage
+coverage/
+.nyc_output/
+
+# Logs & Temporary State
+logs/
+*.log
+.mcponce*
+
+# Environment & Secrets
+.env*
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
