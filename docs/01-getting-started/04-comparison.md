@@ -23,50 +23,47 @@ The MCP ecosystem generally divides into three layers:
 
 ## Feature Comparison Matrix
 
-| Feature / Capability | Official SDK (`@modelcontextprotocol/sdk`) | FastMCP (TypeScript) | Standalone Proxies (e.g., Supergateway) | **mcponce** |
+| Dimension / Capability | Official SDK (`@modelcontextprotocol/sdk`) | FastMCP (TypeScript / Python) | Standalone Proxies (e.g., Supergateway) | **mcponce** |
 | :--- | :---: | :---: | :---: | :---: |
-| **Primary Focus** | Core protocol reference & wire primitives | Ergonomic syntax for quick scripts | Wrapping existing stdio servers without code changes | Enterprise-grade production runtime & lifecycle |
-| **HTTP Web Standards** | ⚠️ Low-level transport primitives | ⚠️ Custom adapter | ✔ Built-in HTTP proxy | ✔ Native [Hono](https://hono.dev/) Streamable HTTP & stdio |
-| **Background Daemon** | ❌ Spawns new process per window | ❌ Spawns new process per window | ❌ Spawns per connection | ✔ Single shared daemon via Unitup (<5ms warm connect) |
-| **Concurrency & Mutex** | ❌ Manual | ❌ Manual | ❌ Manual | ✔ FIFO queues & named mutexes (`sequential: "browser"`) |
-| **Input Coercion** | ❌ Fails on stringified numbers/bools | ❌ Strict Zod parse | ❌ Raw pass-through | ✔ Smart coercion (`"42"` ➔ `42`, JSON strings to objects) |
-| **Response Caching** | ❌ Manual | ❌ Manual | ❌ Manual | ✔ Built-in LRU cache with TTL & fine-grained invalidation |
-| **Inter-Tool Calling** | ❌ Manual | ❌ Manual | ❌ Not applicable | ✔ `context.callTool` with cycle detection & 20-depth guard |
-| **Automatic Retries** | ❌ Manual | ❌ Manual | ❌ Manual | ✔ Exponential backoff & jitter (`retry: 3`) |
-| **Observability & Metrics** | ❌ Console logs only | ❌ Console logs only | ❌ Basic access logs | ✔ Native Prometheus (`/metrics`) & JSON Telemetry (`/analytics`) |
-| **CLI Tool Testing** | ❌ Needs full LLM client | ❌ Needs custom scripts | ⚠️ curl only | ✔ Built-in `mcponce call` with terminal progress bars |
-| **Client Auto-Installer** | ❌ Manual config editing | ❌ Manual config editing | ❌ Manual config editing | ✔ `mcponce install` (Claude Desktop & Cursor 1-click) |
-| **Subscriptions & Push** | ⚠️ Low-level subscribe primitives | ❌ Not supported | ⚠️ Basic SSE forwarding | ✔ Full `resources/subscribe` & `app.notifyResourceUpdated` |
-| **Security & Rate Limiting** | ❌ Manual | ⚠️ Basic Bearer token | ⚠️ Basic proxy headers | ✔ Built-in Bearer & `X-API-Key`, custom `auth.validate`, RBAC scopes, rate limiting & OWASP headers |
-| **Sampling & Roots** | ⚠️ Low-level server methods | ⚠️ Basic sampling helper | ❌ Not supported | ✔ Turnkey `context.sample`, `context.listRoots` & offline fallbacks |
-| **OpenAPI Auto-Gen** | ❌ Manual tool definition | ❌ Separate package/script | ❌ Not supported | ✔ Turnkey `app.fromOpenApi()` & CLI `mcponce openapi` |
-| **Web Inspector & UI** | ⚠️ Separate npm package | ✔ Built-in `fastmcp dev` | ❌ Not supported | ✔ Built-in `/inspect` playground & `mcponce inspect` |
-| **Autocomplete Protocol** | ⚠️ Low-level completable | ✔ Basic completers | ❌ Not supported | ✔ Built-in `completion/complete` for prompts & templates |
+| **Maturity / Stage** | **Official Reference (Stable)** | **Community Standard (Mature)** | **Production Utility (Stable)** | **Alpha (`v0.2.x`, Active Dev)** |
+| **Primary Focus** | Specification reference & wire protocol primitives | Ergonomic syntax for quick scripts & tools | Wrapping existing stdio servers without code changes | All-in-one developer framework & daemon bridge |
+| **HTTP Transport** | Core transport primitives (SSE/HTTP) | Built-in HTTP/SSE server | Built-in HTTP proxy | Native [Hono](https://hono.dev/) Streamable HTTP & stdio |
+| **Multi-Client Daemon** | Userland (1 process per stdio connection) | Userland (1 process per connection) | Per-process or gateway pool | Single shared background daemon via Unitup |
+| **Concurrency & Mutex** | Userland implementation | Standard async | Proxy-level buffering | Built-in FIFO queues & named mutexes (`sequential: true`) |
+| **Input Coercion** | JSON Schema (strict validation) | First-class Zod validation | Raw pass-through | Zod + Smart coercion (`"42"` ➔ `42`, JSON strings to objects) |
+| **Response Caching** | Userland implementation | Userland implementation | Not applicable | Built-in LRU cache with TTL & invalidation |
+| **Inter-Tool Calling** | Manual invocation | Manual invocation | Not applicable | Built-in `context.callTool` with recursion guard |
+| **Automatic Retries** | Userland implementation | Userland implementation | Not applicable | Declarative backoff & jitter (`retry: 3`) |
+| **Observability & Metrics** | Custom logger integration | Standard logging & events | Request logs | Built-in Prometheus (`/metrics`) & JSON Telemetry (`/analytics`) |
+| **CLI & Testing** | Via MCP clients / inspector package | Built-in CLI & dev mode | HTTP / curl | Built-in `mcponce call` with progress reporting |
+| **Client Auto-Installer** | Manual JSON config | Built-in CLI install / manual | Manual JSON config | Built-in `mcponce install` (Claude Desktop & Cursor) |
+| **Developer UI** | Separate `@modelcontextprotocol/inspector` | Built-in `fastmcp dev` UI | Not applicable | Built-in `/inspect` playground (`mcponce inspect`) |
+| **OpenAPI Auto-Gen** | Userland scripts | Community plugins / custom | Not applicable | Built-in `app.fromOpenApi()` & CLI `mcponce openapi` |
 
 ---
 
 ## When to Choose What?
 
 ### 1. Choose the Official SDK (`@modelcontextprotocol/sdk`) if:
+- You want the **canonical, stable reference implementation** from Anthropic.
 - You want **minimal abstractions** and prefer full manual control over every JSON-RPC message and lifecycle event.
-- You are embedding MCP inside an existing custom enterprise framework (e.g., NestJS, Express, Fastify) and already have your own caching, metrics, and queueing infrastructure.
+- You are embedding MCP inside an existing framework (e.g., NestJS, Express, Fastify) and already have your own caching, metrics, and queueing infrastructure.
 - You want strictly zero third-party dependencies beyond Anthropic's official packages.
 
 ### 2. Choose FastMCP if:
-- You want a **minimalist, clean syntax** for quickly exposing a handful of local scripts or utility functions to Claude Desktop.
-- Your tools do not perform complex inter-tool calls, share rate-limited external resources, or require named mutex queues.
-- You prefer decorating simple TypeScript functions without needing background daemon management or Prometheus scrape endpoints.
+- You want an **established, mature community standard** with a clean, concise syntax for quickly exposing scripts and tools.
+- You prefer decorating simple functions in TypeScript or Python without needing background process multiplexing or Prometheus scrape endpoints.
+- You value widespread community adoption, tutorials, and ecosystem examples.
 
 ### 3. Choose Standalone Proxies (Supergateway / mcp-proxy) if:
 - You have an **existing pre-built third-party MCP server** (e.g., a community GitHub/Postgres server) that only supports stdio, and you need to expose it over HTTP/SSE without modifying its source code.
 - You want an external sidecar proxy running alongside Docker containers.
 
 ### 4. Choose `mcponce` if:
-- You are building **production or team-shared MCP servers** where multiple Claude Desktop or Cursor windows shouldn't spawn dozens of redundant Node processes eating gigabytes of RAM.
-- Your tools interact with **exclusive or rate-limited resources** (such as Playwright browser instances, serial ports, or transactional databases) where parallel execution causes race conditions and requires FIFO mutex queues.
-- You want **built-in resilience**: automatic retries on transient network errors, smart input coercion when LLMs hallucinate parameter types, and cooperative `AbortSignal` cancellation.
-- You need **first-class observability**: instant Prometheus scraping for Grafana, live call graph analytics, and structured rotating logs.
-- You want an **all-in-one developer workflow**: develop in a single file, test directly in terminal via `mcponce call`, and deploy with Hono Streamable HTTP.
+- You want an **all-in-one developer framework** that unifies background daemon sharing (avoiding redundant processes for multiple IDE/Claude windows) with built-in resilience (mutex queues, input coercion, retries, caching).
+- Your tools interact with **exclusive or rate-limited resources** (such as headless browsers, serial devices, or transactional DB writes) requiring FIFO mutex queues.
+- You appreciate **integrated developer tooling**: developing in a single file, testing in the terminal with `mcponce call`, and inspecting via the Web Inspector.
+- **Note:** `mcponce` is currently in **active Alpha (`v0.2.x`)**. While tested and functional, APIs may evolve before `v1.0.0`.
 
 ---
 
@@ -74,6 +71,7 @@ The MCP ecosystem generally divides into three layers:
 
 To provide a fair assessment, consider these architectural trade-offs:
 
-1. **Ecosystem Focus**: `mcponce` is purpose-built for the **Node.js / TypeScript** ecosystem. If your primary stack is Python, the Python version of FastMCP or the official Python SDK may be a more natural fit.
-2. **Dependency Footprint**: While lightweight, `mcponce` bundles Hono, Zod, and Unitup to deliver its all-in-one capabilities. If you need a bare-metal implementation with zero runtime dependencies, the official SDK provides a lower baseline.
-3. **Learning Curve for Advanced Features**: If you only need a 5-line script that adds two numbers, `mcponce`'s advanced concurrency queues, retry configurations, and telemetry might offer more power than your simple script requires.
+1. **Alpha Status**: As a `v0.2.x` project, `mcponce` is still stabilizing. If your organization requires multi-year LTS stability guarantees today, the official SDK or established tooling should be considered.
+2. **Ecosystem Focus**: `mcponce` is purpose-built for the **Node.js / TypeScript** ecosystem. If your primary stack is Python, the Python version of FastMCP or the official Python SDK is a more natural fit.
+3. **Dependency Footprint**: While lightweight, `mcponce` bundles Hono, Zod, and Unitup to deliver its all-in-one capabilities. If you need a bare-metal implementation with zero runtime dependencies, the official SDK provides a lower baseline.
+4. **Learning Curve for Advanced Features**: If you only need a 5-line script that adds two numbers, `mcponce`'s concurrency queues, retry configurations, and telemetry might offer more power than your simple script requires.

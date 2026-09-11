@@ -391,5 +391,83 @@ describe('Sequential & Concurrency Queue Control', () => {
         await app.stop();
       }
     });
+
+    it('ConcurrencyQueue throws if maxConcurrency is less than 1', () => {
+      expect(() => new ConcurrencyQueue(0)).toThrow('maxConcurrency must be at least 1');
+      expect(() => new ConcurrencyQueue(-5)).toThrow('maxConcurrency must be at least 1');
+    });
+
+    it('release callback is idempotent and does not corrupt active counter on double release', async () => {
+      const queue = new ConcurrencyQueue(2);
+      const release1 = await queue.acquire();
+      expect(queue.active).toBe(1);
+
+      release1();
+      expect(queue.active).toBe(0);
+
+      // Re-invoking release1 should be a safe no-op
+      release1();
+      expect(queue.active).toBe(0);
+    });
+
+    it('QueueManager getStats provides accurate metrics across multiple named queues', async () => {
+      const qm = new QueueManager();
+      const dbQueue = qm.getQueue('database', 1);
+      const apiQueue = qm.getQueue('api-scraper', 3);
+
+      const releaseDb = await dbQueue.acquire();
+      const releaseApi1 = await apiQueue.acquire();
+      const releaseApi2 = await apiQueue.acquire();
+
+      const stats = qm.getStats();
+      expect(stats.database).toEqual({ active: 1, pending: 0, maxConcurrency: 1 });
+      expect(stats['api-scraper']).toEqual({ active: 2, pending: 0, maxConcurrency: 3 });
+
+      releaseDb();
+      releaseApi1();
+      releaseApi2();
+
+      const afterStats = qm.getStats();
+      expect(afterStats.database.active).toBe(0);
+      expect(afterStats['api-scraper'].active).toBe(0);
+    });
+
+    it('QueueManager clear resets all tracked queues', () => {
+      const qm = new QueueManager();
+      qm.getQueue('q1', 1);
+      qm.getQueue('q2', 2);
+      expect(Object.keys(qm.getStats()).length).toBe(2);
+
+      qm.clear();
+      expect(qm.getStats()).toEqual({});
+    });
+
+    it('multi-slot ConcurrencyQueue accurately caps concurrent tasks at maxConcurrency (e.g. 3)', async () => {
+      const queue = new ConcurrencyQueue(3);
+      let activeCounter = 0;
+      let peakConcurrency = 0;
+
+      const runWorker = async (delayMs: number) => {
+        return queue.run(async () => {
+          activeCounter++;
+          peakConcurrency = Math.max(peakConcurrency, activeCounter);
+          await new Promise((r) => setTimeout(r, delayMs));
+          activeCounter--;
+        });
+      };
+
+      await Promise.all([
+        runWorker(40),
+        runWorker(40),
+        runWorker(40),
+        runWorker(30),
+        runWorker(30),
+        runWorker(20)
+      ]);
+
+      expect(peakConcurrency).toBe(3);
+      expect(queue.active).toBe(0);
+      expect(queue.pending).toBe(0);
+    });
   });
 });

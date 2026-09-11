@@ -138,7 +138,12 @@ export function normalizeToolResult<TData = any>(rawResult: any): ToolCallResult
     };
   }
 
-  const text = JSON.stringify(rawResult);
+  let text = '';
+  try {
+    text = JSON.stringify(rawResult);
+  } catch {
+    text = String(rawResult);
+  }
   return {
     content: [{ type: 'text', text }],
     data: rawResult as unknown as TData,

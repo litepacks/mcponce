@@ -121,4 +121,124 @@ describe('logging and rotation', () => {
     expect(logs.some((l) => l.includes('error event'))).toBe(true);
     expect(logs.some((l) => l.includes('should be ignored'))).toBe(false);
   });
+
+  it('formatLogLine serializes complex metadata, nested objects, and special strings', async () => {
+    const { formatLogLine } = await import('../src/logging/file-logger.js');
+
+    const line = formatLogLine('info', 'user_action', {
+      user: { id: 42, role: 'admin' },
+      tags: ['sys', 'auth'],
+      quoted: 'value with "quotes"',
+      multiline: 'line1\nline2',
+      nullable: null,
+      missing: undefined
+    }, '2026-01-01T00:00:00.000Z');
+
+    expect(line).toBe(
+      '2026-01-01T00:00:00.000Z INFO user_action user={"id":42,"role":"admin"} tags=["sys","auth"] quoted="value with \\"quotes\\"" multiline="line1\\nline2" nullable=null missing=undefined\n'
+    );
+  });
+
+  it('safely handles circular reference metadata without crashing logger', () => {
+    const logger = new DefaultLogger({
+      logDir,
+      level: 'info'
+    });
+
+    const circularMeta: any = { note: 'circular-test' };
+    circularMeta.self = circularMeta;
+
+    // Logging circular reference should NOT throw
+    expect(() => {
+      logger.info('circular-event', circularMeta);
+    }).not.toThrow();
+  });
+
+  it('strictly enforces log level hierarchy across debug, info, warn, and error', () => {
+    const debugLogger = new DefaultLogger({
+      logDir: path.join(testDir, 'debug-logs'),
+      level: 'debug'
+    });
+    debugLogger.debug('d_msg');
+    debugLogger.info('i_msg');
+    debugLogger.warn('w_msg');
+    debugLogger.error('e_msg');
+
+    const debugLogs = debugLogger.readLogs();
+    expect(debugLogs.some((l) => l.includes('d_msg'))).toBe(true);
+    expect(debugLogs.some((l) => l.includes('i_msg'))).toBe(true);
+    expect(debugLogs.some((l) => l.includes('w_msg'))).toBe(true);
+    expect(debugLogs.some((l) => l.includes('e_msg'))).toBe(true);
+
+    const errorLogger = new DefaultLogger({
+      logDir: path.join(testDir, 'error-logs'),
+      level: 'error'
+    });
+    errorLogger.debug('d_msg');
+    errorLogger.info('i_msg');
+    errorLogger.warn('w_msg');
+    errorLogger.error('e_msg');
+
+    const errorLogs = errorLogger.readLogs();
+    expect(errorLogs.some((l) => l.includes('d_msg'))).toBe(false);
+    expect(errorLogs.some((l) => l.includes('i_msg'))).toBe(false);
+    expect(errorLogs.some((l) => l.includes('w_msg'))).toBe(false);
+    expect(errorLogs.some((l) => l.includes('e_msg'))).toBe(true);
+  });
+
+  it('cleanOldLogs safely tolerates subdirectories and non-log files inside log directory', () => {
+    const subDir = path.join(logDir, 'nested-subdir');
+    fs.mkdirSync(subDir, { recursive: true });
+    fs.writeFileSync(path.join(subDir, 'subfile.txt'), 'sub');
+
+    const dotFile = path.join(logDir, '.dotfile.log');
+    fs.writeFileSync(dotFile, 'dot');
+
+    const invalidDateLog = path.join(logDir, '9999-99-99.log');
+    fs.writeFileSync(invalidDateLog, 'future date');
+
+    expect(() => cleanOldLogs(logDir, 7)).not.toThrow();
+    expect(fs.existsSync(subDir)).toBe(true);
+    expect(fs.existsSync(dotFile)).toBe(true);
+  });
+
+  it('readLogs returns empty array for non-existent log directory and respects limit', () => {
+    const emptyLogger = new DefaultLogger({
+      logDir: path.join(testDir, 'empty-nonexistent-dir'),
+      level: 'info'
+    });
+    expect(emptyLogger.readLogs()).toEqual([]);
+
+    const logger = new DefaultLogger({
+      logDir,
+      level: 'info'
+    });
+    for (let i = 1; i <= 5; i++) {
+      logger.info(`event-${i}`);
+    }
+
+    const limited = logger.readLogs(2);
+    expect(limited.length).toBe(2);
+    expect(limited[0]).toContain('event-4');
+    expect(limited[1]).toContain('event-5');
+  });
+
+  it('dynamically toggles stderr streaming via setLogToStderr', () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const logger = new DefaultLogger({
+      logDir,
+      level: 'info',
+      logToStderr: false
+    });
+
+    logger.info('no-stderr');
+    expect(stderrSpy).not.toHaveBeenCalled();
+
+    logger.setLogToStderr(true);
+    logger.info('yes-stderr');
+    expect(stderrSpy).toHaveBeenCalled();
+    expect(stderrSpy.mock.calls[0][0].toString()).toContain('yes-stderr');
+
+    stderrSpy.mockRestore();
+  });
 });

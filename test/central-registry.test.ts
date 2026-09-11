@@ -236,4 +236,151 @@ describe('CentralRegistry (servers.json)', () => {
     expect(s?.status).toBe('stopped');
     expect(s?.pid).toBeUndefined();
   });
+
+  it('register updates existing server without dropping other registered servers', async () => {
+    await registry.register({
+      name: 'srv-primary',
+      version: '1.0.0',
+      status: 'stopped',
+      dataDir: testDir,
+      logDir: testDir
+    });
+
+    await registry.register({
+      name: 'srv-secondary',
+      version: '1.0.0',
+      status: 'stopped',
+      dataDir: testDir,
+      logDir: testDir
+    });
+
+    // Update primary
+    await registry.register({
+      name: 'srv-primary',
+      version: '2.0.0',
+      status: 'stopped',
+      port: 3001,
+      dataDir: testDir,
+      logDir: testDir
+    });
+
+    const primary = await registry.get('srv-primary');
+    const secondary = await registry.get('srv-secondary');
+
+    expect(primary?.version).toBe('2.0.0');
+    expect(primary?.port).toBe(3001);
+    expect(secondary?.name).toBe('srv-secondary');
+  });
+
+  it('updateStatus updates status, applies patch, and clears pid/port on stop', async () => {
+    await registry.register({
+      name: 'patch-test-srv',
+      version: '1.0.0',
+      status: 'stopped',
+      dataDir: testDir,
+      logDir: testDir
+    });
+
+    // 1. Transition to running with patch (read via getAll(false) to bypass health check on unstarted port)
+    await registry.updateStatus('patch-test-srv', 'running', { pid: 2222, port: 5555 });
+    let s = (await registry.getAll(false)).find((x) => x.name === 'patch-test-srv');
+    expect(s?.status).toBe('running');
+    expect(s?.pid).toBe(2222);
+    expect(s?.port).toBe(5555);
+
+    // 2. Transition to stopped -> clears pid and port
+    await registry.updateStatus('patch-test-srv', 'stopped');
+    s = await registry.get('patch-test-srv');
+    expect(s?.status).toBe('stopped');
+    expect(s?.pid).toBeUndefined();
+    expect(s?.port).toBeUndefined();
+  });
+
+  it('clean only removes stopped servers and keeps active servers', async () => {
+    const origFetch = globalThis.fetch;
+    try {
+      // Mock fetch so checkHealth sees active-keep as healthy
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('/health')) {
+          return {
+            ok: true,
+            json: async () => ({ ok: true, name: 'active-keep', pid: process.pid })
+          } as any;
+        }
+        return { ok: false } as any;
+      });
+
+      await registry.register({
+        name: 'active-keep',
+        version: '1.0.0',
+        status: 'running',
+        pid: process.pid,
+        host: '127.0.0.1',
+        port: 45678,
+        dataDir: testDir,
+        logDir: testDir
+      });
+
+      await registry.register({
+        name: 'stopped-del-1',
+        version: '1.0.0',
+        status: 'stopped',
+        dataDir: testDir,
+        logDir: testDir
+      });
+
+      await registry.register({
+        name: 'stopped-del-2',
+        version: '1.0.0',
+        status: 'stopped',
+        dataDir: testDir,
+        logDir: testDir
+      });
+
+      const cleaned = await registry.clean();
+      expect(cleaned).toBe(2);
+
+      const remaining = await registry.getAll(false);
+      expect(remaining.length).toBe(1);
+      expect(remaining[0].name).toBe('active-keep');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('automatically creates parent directories if registryPath is in deep non-existent path', async () => {
+    const deepPath = path.join(testDir, 'nested', 'deep', 'path', 'servers.json');
+    const deepRegistry = new CentralRegistry(deepPath);
+
+    await deepRegistry.register({
+      name: 'deep-srv',
+      version: '1.0.0',
+      status: 'stopped',
+      dataDir: testDir,
+      logDir: testDir
+    });
+
+    expect(fs.existsSync(deepPath)).toBe(true);
+    const server = await deepRegistry.get('deep-srv');
+    expect(server?.name).toBe('deep-srv');
+  });
+
+  it('reconciles server when PID is alive but port is unreachable or unhealthy', async () => {
+    await registry.register({
+      name: 'unhealthy-port-srv',
+      version: '1.0.0',
+      status: 'running',
+      pid: process.pid, // alive PID!
+      port: 65530,      // unreachable port!
+      host: '127.0.0.1',
+      dataDir: testDir,
+      logDir: testDir
+    });
+
+    const all = await registry.getAll(true);
+    const target = all.find((s) => s.name === 'unhealthy-port-srv');
+    expect(target?.status).toBe('stopped');
+    expect(target?.pid).toBeUndefined();
+    expect(target?.port).toBeUndefined();
+  });
 });

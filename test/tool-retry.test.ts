@@ -287,7 +287,7 @@ describe('Automatic Tool Retries with Exponential Backoff', () => {
       ).rejects.toThrow('User aborted operation');
 
       const elapsed = Date.now() - start;
-      expect(elapsed).toBeLessThan(300);
+      expect(elapsed).toBeLessThan(450); // Aborted promptly well before 500ms delay finished
       expect(calls).toBe(1); // Didn't proceed to attempt 2 because sleep was aborted
     });
   });

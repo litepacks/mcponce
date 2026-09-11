@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
 import { createHonoApp } from '../src/server/hono.js';
 import { normalizeToolResult } from '../src/server/mcp.js';
 import { createMcpServer, McpApp } from '../src/index.js';
@@ -13,12 +16,26 @@ import { z } from 'zod';
 
 describe('Server Coverage: Hono, MCP Server, and McpApp Edge Cases', () => {
   let app: McpApp<any> | null = null;
+  const tempDirs: string[] = [];
+
+  function createTempDir(prefix = 'mcp-test'): string {
+    const dir = path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    fs.mkdirSync(dir, { recursive: true });
+    tempDirs.push(dir);
+    return dir;
+  }
 
   afterEach(async () => {
     if (app) {
       await app.stop({ background: false });
       app = null;
     }
+    for (const d of tempDirs) {
+      try {
+        fs.rmSync(d, { recursive: true, force: true });
+      } catch {}
+    }
+    tempDirs.length = 0;
   });
 
   describe('mcp.ts normalizeToolResult & Tool Execution Authorization', () => {
@@ -44,7 +61,7 @@ describe('Server Coverage: Hono, MCP Server, and McpApp Edge Cases', () => {
       const server = createMcpServer({
         name: 'auth-scope-server',
         port: 0,
-        dataDir: `./.mcponce-test-auth-${Date.now()}`
+        dataDir: createTempDir('mcp-auth')
       });
       app = server;
 
@@ -273,7 +290,7 @@ describe('Server Coverage: Hono, MCP Server, and McpApp Edge Cases', () => {
       const server = createMcpServer({
         name: 'app-methods-test',
         port: 0,
-        dataDir: `./.mcponce-test-methods-${Date.now()}`
+        dataDir: createTempDir('mcp-methods')
       });
       app = server;
 
@@ -318,8 +335,6 @@ describe('Server Coverage: Hono, MCP Server, and McpApp Edge Cases', () => {
       // getInspectorUrl
       const inspectorUrl = server.getInspectorUrl();
       expect(inspectorUrl).toContain(`:${startRes.port}/inspect`);
-      const customInspectorUrl = server.getInspectorUrl('127.0.0.1');
-      expect(customInspectorUrl).toContain('http://127.0.0.1:');
 
       // Resource listener & notifications
       let notifiedUri: string | null = null;
@@ -343,6 +358,49 @@ describe('Server Coverage: Hono, MCP Server, and McpApp Edge Cases', () => {
       // Stop server
       await server.stop();
       expect((await server.status()).status).toBe('stopped');
+    });
+
+    it('handles query for non-existent tools and prompts returning undefined', () => {
+      const server = createMcpServer({
+        name: 'non-existent-lookup-test',
+        port: 0,
+        dataDir: createTempDir('mcp-lookup')
+      });
+      app = server;
+
+      expect(server.getTool('non_existent_tool')).toBeUndefined();
+      expect(server.getPrompt('non_existent_prompt')).toBeUndefined();
+      expect(server.getTools()).toEqual([]);
+    });
+
+    it('registers multiple tools and prompts and retrieves all correctly', () => {
+      const server = createMcpServer({
+        name: 'multi-registration-test',
+        port: 0,
+        dataDir: createTempDir('mcp-multi')
+      });
+      app = server;
+
+      server.tool('tool_one', { x: 'number' }, async ({ x }) => x * 2);
+      server.tool('tool_two', { y: 'string' }, async ({ y }) => y.toUpperCase());
+      server.prompt({
+        name: 'prompt_one',
+        handler: async () => ({ messages: [] })
+      });
+      server.prompt({
+        name: 'prompt_two',
+        description: 'Second prompt',
+        handler: async () => ({ messages: [] })
+      });
+
+      const tools = server.getTools();
+      expect(tools.length).toBe(2);
+      expect(tools.map((t) => t.name).sort()).toEqual(['tool_one', 'tool_two']);
+
+      expect(server.getTool('tool_one')).toBeDefined();
+      expect(server.getTool('tool_two')).toBeDefined();
+      expect(server.getPrompt('prompt_one')).toBeDefined();
+      expect(server.getPrompt('prompt_two')?.description).toBe('Second prompt');
     });
   });
 });

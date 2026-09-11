@@ -343,4 +343,158 @@ describe('Resilience and Crash Scenarios', () => {
     const status = await app.status();
     expect(status.status).toBe('stopped');
   });
+
+  it('handles JSON-RPC notifications (id omitted) safely without response', async () => {
+    const app = createMcpServer({
+      name: 'notification-test-server',
+      dataDir: testDir,
+      port: 0,
+      registerInCentral: false
+    });
+
+    const startResult = await app.start();
+    const baseUrl = `http://${startResult.host}:${startResult.port}`;
+
+    try {
+      // 1. Initialize session
+      const initRes = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'c', version: '1' } }
+        })
+      });
+      const sessionId = initRes.headers.get('mcp-session-id')!;
+
+      // 2. Send notification (no id)
+      const notifRes = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/event-stream',
+          'mcp-session-id': sessionId
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'notifications/initialized'
+        })
+      });
+
+      // Notification should be accepted (200 or 204 or 202) without failing the session
+      expect(notifRes.status).toBeLessThan(400);
+
+      // 3. Server remains healthy
+      const healthRes = await fetch(`${baseUrl}/health`);
+      expect(healthRes.status).toBe(200);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it('normalizes tools returning BigInt or special non-JSON values without throwing TypeError', async () => {
+    const app = createMcpServer({
+      name: 'bigint-test-server',
+      dataDir: testDir,
+      port: 0,
+      registerInCentral: false
+    });
+
+    app.tool({
+      name: 'get_bigint',
+      handler: () => 9007199254740993n as any
+    });
+
+    await app.start();
+    try {
+      const res = await app.callTool('get_bigint');
+      expect(res.isError).toBeFalsy();
+      expect(res.content[0].text).toBe('9007199254740993');
+      expect(res.data).toBe(9007199254740993n);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it('detects cyclic tool calls and rejects with descriptive Circular tool invocation detected error', async () => {
+    const app = createMcpServer({
+      name: 'cyclic-test-server',
+      dataDir: testDir,
+      port: 0,
+      registerInCentral: false
+    });
+
+    app.tool({
+      name: 'tool_alpha',
+      handler: async (_args, _ctx, { callTool }) => {
+        return await callTool('tool_beta', {});
+      }
+    });
+
+    app.tool({
+      name: 'tool_beta',
+      handler: async (_args, _ctx, { callTool }) => {
+        return await callTool('tool_alpha', {});
+      }
+    });
+
+    await app.start();
+    try {
+      await expect(app.callTool('tool_alpha', {})).rejects.toThrow(
+        /Circular tool invocation detected: tool_alpha -> tool_beta -> tool_alpha/
+      );
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it('remains resilient and healthy when a middleware throws an unhandled error', async () => {
+    const app = createMcpServer({
+      name: 'middleware-error-resilience-server',
+      dataDir: testDir,
+      port: 0,
+      registerInCentral: false
+    });
+
+    app.use(async (ctx, next) => {
+      if (ctx.tool === 'exploding_tool') {
+        throw new Error('Middleware boom');
+      }
+      return next();
+    });
+
+    app.tool('exploding_tool', async () => 'exploded');
+    app.tool('healthy_tool', async () => 'survived');
+
+    await app.start();
+    try {
+      // 1. Exploding tool fails via middleware
+      await expect(app.callTool('exploding_tool')).rejects.toThrow('Middleware boom');
+
+      // 2. Subsequent healthy tool call succeeds cleanly
+      const healthyRes = await app.callTool('healthy_tool');
+      expect(healthyRes.data).toBe('survived');
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it('handles concurrent calls to app.stop() without error', async () => {
+    const app = createMcpServer({
+      name: 'concurrent-stop-test-server',
+      dataDir: testDir,
+      port: 0,
+      registerInCentral: false
+    });
+
+    await app.start();
+
+    // Call stop concurrently 3 times
+    await expect(Promise.all([app.stop(), app.stop(), app.stop()])).resolves.toBeDefined();
+
+    const status = await app.status();
+    expect(status.status).toBe('stopped');
+  });
 });

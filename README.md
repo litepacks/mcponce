@@ -2,6 +2,10 @@
 
 > **Cross-platform MCP server from a single executable file** powered by **Hono** and the official **Model Context Protocol SDK**.
 
+> [!NOTE]
+> **Project Status: Alpha (`v0.2.x`)**
+> `mcponce` is currently in active **Alpha** development. Core features (dual-transport stdio/HTTP bridging, background daemon sharing, caching, concurrency controls, and CLI tools) are functional and tested, but APIs and internal interfaces are subject to refinement before a `v1.0.0` stable release. We welcome community testing and feedback.
+
 Add the MCP server once in your client settings, point it to one executable file, and let that file automatically start or reuse the local server.
 
 ```text
@@ -36,7 +40,7 @@ Claude / Cursor / Antigravity / VS Code
 - **Images & Binary Media**: Return raw `Buffer`s or use `image(buffer)` helpers with automatic magic byte MIME detection (PNG, JPEG, GIF, WEBP, BMP, SVG) and base64 encoding.
 - **Dynamic Resource URI Templates (RFC 6570)**: Expose parametric resources (`users://{userId}/profile`) with parameter extraction, client autocompletion callbacks, and automatic return normalization.
 - **Resource Subscriptions & Live Push**: Client subscriptions (`resources/subscribe`, `resources/unsubscribe`) with live push updates (`app.notifyResourceUpdated`, `app.notifyResourceListChanged`).
-- **Enterprise Security & Rate Limiting**: Multi-key Bearer/API Key auth, custom identity validators (`auth.validate`), tool-level RBAC scopes, sliding-window rate limiting (429 Retry-After), and OWASP security headers.
+- **Security, Authentication & Rate Limiting**: Multi-key Bearer/API Key auth, custom identity validators (`auth.validate`), tool-level RBAC scopes, sliding-window rate limiting (429 Retry-After), and standard security headers.
 - **MCP Sampling & Workspace Roots**: Enable autonomous sub-agents by requesting LLM completions back from the client (`context.sample`) and querying open IDE workspace directories (`context.listRoots`).
 - **OpenAPI / Swagger Auto-Generation**: Transform any REST API into type-safe MCP tools in 1 line with `app.fromOpenApi()`.
 - **Interactive Web Inspector & Playground**: Zero-dependency browser developer UI at `/inspect` (`mcponce inspect` / `server.js inspect`) with dynamic form generation, execution diagnostics, and live metrics.
@@ -47,34 +51,31 @@ Claude / Cursor / Antigravity / VS Code
 
 ## Comparison & Alternatives
 
-Different tools in the MCP ecosystem serve different architectural needs:
+Different tools in the MCP ecosystem serve distinct architectural needs and maturity levels:
 
-| Feature / Capability | Official SDK (`@modelcontextprotocol/sdk`) | FastMCP (TypeScript) | Standalone Proxies (e.g., Supergateway) | **mcponce** |
+| Dimension / Capability | Official SDK (`@modelcontextprotocol/sdk`) | FastMCP (TypeScript / Python) | Standalone Proxies (e.g., Supergateway) | **mcponce** |
 | :--- | :---: | :---: | :---: | :---: |
-| **Primary Focus** | Core protocol reference & wire primitives | Ergonomic syntax for quick scripts | Wrapping existing stdio servers without code changes | Enterprise-grade production runtime & lifecycle |
-| **HTTP Web Standards** | ⚠️ Low-level transport primitives | ⚠️ Custom adapter | ✔ Built-in HTTP proxy | ✔ Native [Hono](https://hono.dev/) Streamable HTTP & stdio |
-| **Background Daemon** | ❌ Spawns new process per window | ❌ Spawns new process per window | ❌ Spawns per connection | ✔ Single shared daemon via Unitup (<5ms warm connect) |
-| **Concurrency & Mutex** | ❌ Manual | ❌ Manual | ❌ Manual | ✔ FIFO queues & named mutexes (`sequential: "browser"`) |
-| **Input Coercion** | ❌ Fails on stringified numbers/bools | ❌ Strict Zod parse | ❌ Raw pass-through | ✔ Smart coercion (`"42"` ➔ `42`, JSON strings to objects) |
-| **Response Caching** | ❌ Manual | ❌ Manual | ❌ Manual | ✔ Built-in LRU cache with TTL & fine-grained invalidation |
-| **Inter-Tool Calling** | ❌ Manual | ❌ Manual | ❌ Not applicable | ✔ `context.callTool` with cycle detection & 20-depth guard |
-| **Automatic Retries** | ❌ Manual | ❌ Manual | ❌ Manual | ✔ Exponential backoff & jitter (`retry: 3`) |
-| **Observability & Metrics** | ❌ Console logs only | ❌ Console logs only | ❌ Basic access logs | ✔ Native Prometheus (`/metrics`) & JSON Telemetry (`/analytics`) |
-| **CLI Tool Testing** | ❌ Needs full LLM client | ❌ Needs custom scripts | ⚠️ curl only | ✔ Built-in `mcponce call` with terminal progress bars |
-| **Client Auto-Installer** | ❌ Manual config editing | ❌ Manual config editing | ❌ Manual config editing | ✔ `mcponce install` (Claude Desktop & Cursor 1-click) |
-| **Subscriptions & Push** | ⚠️ Low-level subscribe primitives | ❌ Not supported | ⚠️ Basic SSE forwarding | ✔ Full `resources/subscribe` & `app.notifyResourceUpdated` |
-| **Security & Rate Limiting** | ❌ Manual | ⚠️ Basic Bearer token | ⚠️ Basic proxy headers | ✔ Built-in Bearer & `X-API-Key`, custom `auth.validate`, RBAC scopes, rate limiting & OWASP headers |
-| **Sampling & Roots** | ⚠️ Low-level server methods | ⚠️ Basic sampling helper | ❌ Not supported | ✔ Turnkey `context.sample`, `context.listRoots` & offline fallbacks |
-| **OpenAPI Auto-Gen** | ❌ Manual tool definition | ❌ Separate package/script | ❌ Not supported | ✔ Turnkey `app.fromOpenApi()` & CLI `mcponce openapi` |
-| **Web Inspector & UI** | ⚠️ Separate npm package | ✔ Built-in `fastmcp dev` | ❌ Not supported | ✔ Built-in `/inspect` playground & `mcponce inspect` |
-| **Autocomplete Protocol** | ⚠️ Low-level completable | ✔ Basic completers | ❌ Not supported | ✔ Built-in `completion/complete` for prompts & templates |
+| **Maturity / Stage** | **Official Reference (Stable)** | **Community Standard (Mature)** | **Production Utility (Stable)** | **Alpha (`v0.2.x`, Active Dev)** |
+| **Primary Focus** | Specification reference & wire protocol primitives | Ergonomic syntax for quick scripts & tools | Wrapping existing stdio servers without code changes | All-in-one developer framework & daemon bridge |
+| **HTTP Transport** | Core transport primitives (SSE/HTTP) | Built-in HTTP/SSE server | Built-in HTTP proxy | Native [Hono](https://hono.dev/) Streamable HTTP & stdio |
+| **Multi-Client Daemon** | Userland (1 process per stdio connection) | Userland (1 process per connection) | Per-process or gateway pool | Single shared background daemon via Unitup |
+| **Concurrency & Mutex** | Userland implementation | Standard async | Proxy-level buffering | Built-in FIFO queues & named mutexes (`sequential: true`) |
+| **Input Coercion** | JSON Schema (strict validation) | First-class Zod validation | Raw pass-through | Zod + Smart coercion (`"42"` ➔ `42`, JSON strings to objects) |
+| **Response Caching** | Userland implementation | Userland implementation | Not applicable | Built-in LRU cache with TTL & invalidation |
+| **Inter-Tool Calling** | Manual invocation | Manual invocation | Not applicable | Built-in `context.callTool` with recursion guard |
+| **Automatic Retries** | Userland implementation | Userland implementation | Not applicable | Declarative backoff & jitter (`retry: 3`) |
+| **Observability & Metrics** | Custom logger integration | Standard logging & events | Request logs | Built-in Prometheus (`/metrics`) & JSON Telemetry (`/analytics`) |
+| **CLI & Testing** | Via MCP clients / inspector package | Built-in CLI & dev mode | HTTP / curl | Built-in `mcponce call` with progress reporting |
+| **Client Auto-Installer** | Manual JSON config | Built-in CLI install / manual | Manual JSON config | Built-in `mcponce install` (Claude Desktop & Cursor) |
+| **Developer UI** | Separate `@modelcontextprotocol/inspector` | Built-in `fastmcp dev` UI | Not applicable | Built-in `/inspect` playground (`mcponce inspect`) |
+| **OpenAPI Auto-Gen** | Userland scripts | Community plugins / custom | Not applicable | Built-in `app.fromOpenApi()` & CLI `mcponce openapi` |
 
 ### When to choose what?
 
-- **Choose the Official SDK** if you want minimal abstractions, zero extra dependencies beyond Anthropic packages, or are embedding MCP inside an existing custom enterprise framework (NestJS, Express, Fastify) that already has its own lifecycle, caching, and queueing infrastructure.
-- **Choose FastMCP** if you are writing quick utility scripts, prefer decorating simple functions, and do not need background process multiplexing, named mutex queues, or Prometheus metrics.
-- **Choose Standalone Proxies (Supergateway / mcp-proxy)** if you have an existing third-party MCP server binary (e.g. from GitHub) that only supports stdio and you need to expose it over SSE/HTTP without touching its source code.
-- **Choose `mcponce`** if you are building production or team-shared MCP servers where multiple client windows should share a single warm background process, your tools touch rate-limited/exclusive resources needing mutex serialization, you want protection against LLM hallucinated argument types, or you require out-of-the-box Prometheus metrics and terminal CLI debugging.
+- **Choose the Official SDK** if you want the canonical, stable reference implementation from Anthropic, require minimal third-party dependencies, or are embedding MCP into existing frameworks (NestJS, Express, Fastify) that already manage their own lifecycle, caching, and queueing.
+- **Choose FastMCP** if you want an established, mature community standard with a clean, concise syntax for quickly exposing scripts and tools to AI clients without needing daemon multiplexing or Prometheus metrics.
+- **Choose Standalone Proxies (Supergateway / mcp-proxy)** if you have an existing third-party stdio MCP server binary and want to expose it over HTTP/SSE without modifying any code.
+- **Choose `mcponce`** if you want an all-in-one developer experience with shared background daemon efficiency (avoiding duplicate processes for multiple IDE/Claude windows), built-in resilience primitives (mutex queues, input coercion, retries, cache), and turnkey CLI/Inspector tooling — keeping in mind that **mcponce is currently in Alpha (`v0.2.x`)** and actively stabilizing.
 
 ## Installation
 
@@ -218,13 +219,13 @@ app.onResourceUpdated((uri, sessionIds) => {
 });
 ```
 
-### Enterprise Security, Authentication & Rate Limiting
+### Security, Authentication & Rate Limiting
 
-Secure your MCP HTTP/SSE endpoints with multi-key authentication, custom identity validators (`auth.validate`), tool-level RBAC scopes, sliding-window rate limiting, and OWASP security headers. The public `/health` endpoint remains open for container orchestration and uptime monitoring.
+Secure your MCP HTTP/SSE endpoints with multi-key authentication, custom identity validators (`auth.validate`), tool-level RBAC scopes, sliding-window rate limiting, and standard security headers. The public `/health` endpoint remains open for container orchestration and uptime monitoring.
 
 ```ts
 const app = createMcpServer({
-  name: "enterprise-mcp-server",
+  name: "secure-mcp-server",
   // 1. Static API keys (Bearer token or X-API-Key header)
   apiKey: ["secret-token-12345", "backup-key-67890"],
 
@@ -413,7 +414,7 @@ console.log(sanitizeToolName("my tool: calculate!")); // "my_tool_calculate"
 
 ### Timeouts, Cancellation, and Error Resilience
 
-`mcponce` provides enterprise-grade timeout, cancellation, and error handling out of the box:
+`mcponce` provides built-in timeout, cancellation, and error handling out of the box:
 
 - **Per-Tool & Global Timeouts**: Set `timeoutMs` per tool or `toolTimeoutMs` globally on the server (defaults to 60s, configurable via `MCP_TOOL_TIMEOUT_MS`). Set `timeoutMs: 0` to disable timeouts for long-running batch jobs.
 - **Client Cancellation (`notifications/cancelled`)**: When a user clicks "Stop" in Claude, Cursor, or Antigravity, the client sends `notifications/cancelled`. `mcponce` automatically aborts the tool's `signal` (`AbortSignal`).

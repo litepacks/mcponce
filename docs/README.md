@@ -7,6 +7,10 @@ description: Cross-platform single-executable Model Context Protocol (MCP) serve
 
 > **Cross-platform, single-executable Model Context Protocol (MCP) server framework** powered by Hono and the official Model Context Protocol TypeScript SDK.
 
+> [!NOTE]
+> **Project Status: Alpha (`v0.2.x`)**
+> `mcponce` is currently in active **Alpha** development. Features and developer utilities are functional and covered by extensive tests, but APIs and internals may refine ahead of a `v1.0.0` stable release. Community feedback and contributions are welcome!
+
 ```bash
 npm install mcponce
 ```
@@ -15,7 +19,7 @@ npm install mcponce
 
 ## ⚡ Overview
 
-**`mcponce`** simplifies building, testing, deploying, and observing production-grade MCP servers for LLM agents (Claude Desktop, Cursor, Antigravity, custom AI workflows).
+**`mcponce`** is an all-in-one developer framework (Alpha) for building, testing, and observing MCP servers for LLM agents (Claude Desktop, Cursor, Antigravity, custom AI workflows).
 
 Unlike raw SDK setups that require managing subprocess lifecycles, setting up custom HTTP routers, or creating separate proxy daemons, `mcponce` packages **everything into a single runnable file**:
 
@@ -116,7 +120,7 @@ npx mcponce call calculate_mortgage --principal 300000 --years 15
 - **Smart Input Coercion**: Automatically coerces stringified numbers, booleans, and JSON objects sent by LLMs or CLI flags.
 - **Dynamic Resource Templates**: RFC 6570 parametric URI templates (`users://{userId}/profile`) with automated variable extraction, autocomplete handlers, and return normalization.
 - **Resource Subscriptions & Live Push**: Client subscriptions (`resources/subscribe`, `resources/unsubscribe`) with live push updates (`app.notifyResourceUpdated`, `app.notifyResourceListChanged`).
-- **Enterprise Security & Rate Limiting**: Multi-key Bearer/API Key auth, custom identity validators (`auth.validate`), tool-level RBAC scopes, sliding-window rate limiting (429 Retry-After), and OWASP security headers.
+- **Security, Authentication & Rate Limiting**: Multi-key Bearer/API Key auth, custom identity validators (`auth.validate`), tool-level RBAC scopes, sliding-window rate limiting (429 Retry-After), and standard security headers.
 - **MCP Sampling & Workspace Roots**: Turn tools into autonomous sub-agents by requesting LLM completions back from the client (`context.sample`) and discovering open project directories (`context.listRoots`).
 - **OpenAPI & Swagger Tool Generation**: Auto-generate type-safe MCP tools from any OpenAPI 3 or Swagger 2 spec with `app.fromOpenApi()`.
 - **Interactive Web Inspector & Autocomplete**: Zero-dependency browser playground at `/inspect` (`mcponce inspect` / `server.js inspect`) with live form execution and official MCP `completion/complete` support.

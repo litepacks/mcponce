@@ -790,19 +790,33 @@ describe('mcponce CLI Binary Runner (src/cli/bin.ts)', () => {
 
   describe('Helper functions (findLocalServerScript, extractServerName, parseMcpResponse)', () => {
     it('findLocalServerScript returns candidate if found in current directory', () => {
-      const origCwd = process.cwd();
-      try {
-        process.chdir(tmpDir);
-        expect(findLocalServerScript()).toBeNull();
+      expect(findLocalServerScript(tmpDir)).toBeNull();
 
-        fs.writeFileSync(path.join(tmpDir, 'server.js'), '// test');
-        expect(findLocalServerScript()).toBe('server.js');
+      fs.writeFileSync(path.join(tmpDir, 'server.js'), '// test');
+      expect(findLocalServerScript(tmpDir)).toBe('server.js');
 
-        fs.writeFileSync(path.join(tmpDir, 'index.js'), '// test');
-        expect(findLocalServerScript()).toBe('index.js');
-      } finally {
-        process.chdir(origCwd);
-      }
+      fs.writeFileSync(path.join(tmpDir, 'index.js'), '// test');
+      expect(findLocalServerScript(tmpDir)).toBe('index.js');
+    });
+
+    it('findLocalServerScript respects resolution priority across .ts, .mjs, and .js', () => {
+      const specificDir = path.join(tmpDir, 'priority-test');
+      fs.mkdirSync(specificDir, { recursive: true });
+
+      fs.writeFileSync(path.join(specificDir, 'server.ts'), '// typescript');
+      expect(findLocalServerScript(specificDir)).toBe('server.ts');
+
+      fs.writeFileSync(path.join(specificDir, 'server.mjs'), '// esm');
+      expect(findLocalServerScript(specificDir)).toBe('server.mjs');
+
+      fs.writeFileSync(path.join(specificDir, 'app.js'), '// app');
+      expect(findLocalServerScript(specificDir)).toBe('app.js');
+
+      fs.writeFileSync(path.join(specificDir, 'server.js'), '// server');
+      expect(findLocalServerScript(specificDir)).toBe('server.js');
+
+      fs.writeFileSync(path.join(specificDir, 'index.js'), '// index');
+      expect(findLocalServerScript(specificDir)).toBe('index.js');
     });
 
     it('extractServerNameFromEntrypoint detects name from file or package.json', () => {
@@ -818,6 +832,19 @@ describe('mcponce CLI Binary Runner (src/cli/bin.ts)', () => {
       fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'pkg-mcp-app' }));
       expect(extractServerNameFromEntrypoint(noNameFile)).toBe('pkg-mcp-app');
       expect(extractServerNameFromEntrypoint('/nonexistent/path/file.js')).toBeNull();
+    });
+
+    it('extractServerNameFromEntrypoint detects createMcpServer name patterns with double quotes or multi-line', () => {
+      const esmFile = path.join(tmpDir, 'multi-line.js');
+      fs.writeFileSync(
+        esmFile,
+        `import { createMcpServer } from 'mcponce';\n\nconst server = createMcpServer({\n  name: "double-quote-app",\n  version: "1.0.0"\n});`
+      );
+      expect(extractServerNameFromEntrypoint(esmFile)).toBe('double-quote-app');
+
+      const shorthandFile = path.join(tmpDir, 'shorthand.js');
+      fs.writeFileSync(shorthandFile, `const app = createMcpServer('shorthand-app');`);
+      expect(extractServerNameFromEntrypoint(shorthandFile)).toBe('shorthand-app');
     });
 
     it('parseMcpResponse handles SSE stream, JSON response, and fallback text', async () => {
@@ -842,6 +869,15 @@ describe('mcponce CLI Binary Runner (src/cli/bin.ts)', () => {
         text: async () => 'data: {"fallback":"ok"}'
       };
       expect(await parseMcpResponse(fallbackRes)).toEqual({ fallback: 'ok' });
+    });
+
+    it('parseMcpResponse handles raw non-SSE non-JSON text safely', async () => {
+      const plainRes = {
+        headers: { get: () => 'text/plain' },
+        json: async () => { throw new Error('Not JSON'); },
+        text: async () => 'Server error occurred'
+      };
+      expect(await parseMcpResponse(plainRes)).toEqual({ raw: 'Server error occurred' });
     });
   });
 });

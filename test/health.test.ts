@@ -129,4 +129,99 @@ describe('health and PID checks', () => {
       globalThis.fetch = origFetch;
     }
   });
+
+  it('checkHealth returns null when endpoint returns non-object JSON (array, primitive number, string)', async () => {
+    const origFetch = globalThis.fetch;
+    try {
+      // 1. Array JSON
+      globalThis.fetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => [1, 2, 3]
+      } as any);
+      expect(await checkHealth('127.0.0.1', testPort, 'health-test-app')).toBeNull();
+
+      // 2. Primitive number JSON
+      globalThis.fetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => 42
+      } as any);
+      expect(await checkHealth('127.0.0.1', testPort, 'health-test-app')).toBeNull();
+
+      // 3. String JSON
+      globalThis.fetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => 'healthy'
+      } as any);
+      expect(await checkHealth('127.0.0.1', testPort, 'health-test-app')).toBeNull();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('checkHealth handles request timeouts and connection aborts', async () => {
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn().mockImplementationOnce(async () => {
+        const err: any = new Error('The operation was aborted');
+        err.name = 'TimeoutError';
+        throw err;
+      });
+      const res = await checkHealth('127.0.0.1', testPort, 'health-test-app', 50);
+      expect(res).toBeNull();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('fetchInfo handles non-JSON HTML error pages without crashing', async () => {
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn().mockResolvedValueOnce({
+        ok: true, // e.g. a misconfigured proxy returning 200 with HTML error body
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON at position 0');
+        }
+      } as any);
+      const info = await fetchInfo('127.0.0.1', testPort);
+      expect(info).toBeNull();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('fetchInfo handles HTTP 500 internal server error', async () => {
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 500
+      } as any);
+      const info = await fetchInfo('127.0.0.1', testPort);
+      expect(info).toBeNull();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('isPidRunning handles NaN, Infinity, null/undefined, and extreme values', () => {
+    expect(isPidRunning(NaN)).toBe(false);
+    expect(isPidRunning(Infinity as any)).toBe(false);
+    expect(isPidRunning(-Infinity as any)).toBe(false);
+    expect(isPidRunning(undefined as any)).toBe(false);
+    expect(isPidRunning(null as any)).toBe(false);
+  });
+
+  it('checkHealth returns null when ok is true but name is missing', async () => {
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ok: true, pid: 1234 }) // missing name
+      } as any);
+      const res = await checkHealth('127.0.0.1', testPort, 'expected-app');
+      expect(res).toBeNull();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

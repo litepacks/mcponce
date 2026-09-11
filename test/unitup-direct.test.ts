@@ -114,4 +114,73 @@ describe('Unitup Runtime Helper (src/runtime/unitup.ts)', () => {
     const nullSt = await getBackgroundStatus('status-app');
     expect(nullSt).toBeNull();
   });
+
+  it('starts background process using process defaults when command and args are omitted', async () => {
+    await startBackgroundProcess({
+      name: 'defaults-app',
+      dataDir: '/var/data',
+      logDir: '/var/logs'
+    });
+
+    expect(mockUnitup.install).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'mcponce-defaults-app',
+        command: process.execPath,
+        cwd: process.cwd(),
+        args: expect.arrayContaining(['--mcponce-background']),
+        logs: {
+          stdout: '/var/logs/unitup.stdout.log',
+          stderr: '/var/logs/unitup.stderr.log'
+        },
+        start: true,
+        force: true
+      })
+    );
+  });
+
+  it('merges custom env variables with MCPONCE_BACKGROUND_SERVER flag', async () => {
+    await startBackgroundProcess({
+      name: 'env-merge-app',
+      dataDir: '/data',
+      logDir: '/logs',
+      env: {
+        CUSTOM_DATABASE_URL: 'postgres://localhost/test',
+        APP_ENV: 'staging'
+      }
+    });
+
+    const installCall = mockUnitup.install.mock.calls.find(
+      (c: any[]) => c[0].name === 'mcponce-env-merge-app'
+    );
+    expect(installCall).toBeDefined();
+    expect(installCall[0].env.CUSTOM_DATABASE_URL).toBe('postgres://localhost/test');
+    expect(installCall[0].env.APP_ENV).toBe('staging');
+    expect(installCall[0].env.MCPONCE_BACKGROUND_SERVER).toBe('1');
+  });
+
+  it('handles partial stop failure gracefully (stop throws, but uninstall succeeds)', async () => {
+    mockUnitup.stop.mockRejectedValueOnce(new Error('Process already stopped'));
+    const ok = await stopBackgroundProcess('partially-stopped');
+    expect(ok).toBe(true);
+    expect(mockUnitup.uninstall).toHaveBeenCalledWith('mcponce-partially-stopped', { force: true });
+  });
+
+  it('propagates error when both restart and fallback install fail', async () => {
+    mockUnitup.restart.mockRejectedValueOnce(new Error('Service restart failed'));
+    mockUnitup.install.mockRejectedValueOnce(new Error('Service fallback install failed'));
+
+    await expect(
+      restartBackgroundProcess({
+        name: 'failing-restart-app',
+        dataDir: '/data',
+        logDir: '/logs'
+      })
+    ).rejects.toThrow('Service fallback install failed');
+  });
+
+  it('getBackgroundStatus returns null when status throws a non-Error exception', async () => {
+    mockUnitup.status.mockRejectedValueOnce('raw string error message');
+    const st = await getBackgroundStatus('non-error-status');
+    expect(st).toBeNull();
+  });
 });

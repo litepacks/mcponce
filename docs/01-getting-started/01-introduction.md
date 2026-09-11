@@ -1,13 +1,17 @@
 ---
 title: Introduction to mcponce
-description: Understanding the Model Context Protocol (MCP) and why mcponce is the modern choice for building production servers.
+description: Understanding the Model Context Protocol (MCP) and how mcponce provides an all-in-one framework for building MCP servers.
 ---
 
 # Introduction to mcponce
 
+> [!NOTE]
+> **Project Status: Alpha (`v0.2.x`)**
+> `mcponce` is currently in active **Alpha** development. Features and developer utilities are functional and tested, but APIs and internal interfaces are subject to refinement before a `v1.0.0` stable release. We welcome community testing and feedback.
+
 The **Model Context Protocol (MCP)** is an open standard created by Anthropic that allows large language models (LLMs) like Claude Desktop, Cursor, and IDE extensions to securely interact with external tools, resources, and custom services.
 
-While the official `@modelcontextprotocol/sdk` provides core protocol primitives, developers building production MCP servers quickly face real-world challenges:
+While the official `@modelcontextprotocol/sdk` provides core protocol primitives, developers building real-world MCP servers face common architectural challenges:
 
 1. **Subprocess Hell**: Traditional stdio servers launch a fresh Node.js subprocess for *every single client window*, duplicating memory and database connections.
 2. **Boilerplate Overload**: Setting up input schemas, timeouts, cancel signals, retries, and caching requires hundreds of lines of repetitive glue code.

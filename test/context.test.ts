@@ -102,4 +102,203 @@ describe('shared application context', () => {
     expect(cached).toBe(ctx1);
     expect(withFactory.getContext()).toBe(ctx1);
   });
+
+  it('handles slow/delayed async context factory without redundant execution', async () => {
+    let factoryInvocations = 0;
+    const { ContextManager } = await import('../src/server/context.js');
+
+    const manager = new ContextManager(async () => {
+      factoryInvocations++;
+      await new Promise((r) => setTimeout(r, 50));
+      return { connectedAt: Date.now() };
+    });
+
+    const results = await Promise.all([
+      manager.initialize(),
+      manager.initialize(),
+      manager.initialize(),
+      manager.initialize()
+    ]);
+
+    expect(factoryInvocations).toBe(1);
+    expect(results[0]).toBe(results[1]);
+    expect(results[1]).toBe(results[2]);
+    expect(results[2]).toBe(results[3]);
+    expect(manager.isInitialized()).toBe(true);
+  });
+
+  it('resets initializingPromise after failure allowing subsequent retry', async () => {
+    const { ContextManager } = await import('../src/server/context.js');
+    let attempts = 0;
+
+    const manager = new ContextManager(async () => {
+      attempts++;
+      if (attempts === 1) {
+        throw new Error('Transient connection outage');
+      }
+      return { healthy: true, attempt: attempts };
+    });
+
+    // First attempt fails
+    await expect(manager.initialize()).rejects.toThrow('Transient connection outage');
+    expect(manager.isInitialized()).toBe(false);
+
+    // Second attempt recovers and succeeds
+    const ctx = await manager.initialize();
+    expect(ctx).toEqual({ healthy: true, attempt: 2 });
+    expect(manager.isInitialized()).toBe(true);
+    expect(manager.getContext()).toEqual({ healthy: true, attempt: 2 });
+  });
+
+  it('supports shared state mutation across distinct tool handlers', async () => {
+    interface StateContext {
+      state: {
+        store: Record<string, string>;
+        counter: number;
+      };
+    }
+
+    const app = createMcpServer<StateContext>({
+      name: 'mutation-app',
+      dataDir: testDir,
+      async context() {
+        return {
+          state: {
+            store: {},
+            counter: 0
+          }
+        };
+      }
+    });
+
+    app.tool({
+      name: 'set_value',
+      inputSchema: { key: 'string', value: 'string' },
+      async handler({ key, value }, ctx) {
+        ctx.state.store[key] = value;
+        ctx.state.counter++;
+        return { stored: true, count: ctx.state.counter };
+      }
+    });
+
+    app.tool({
+      name: 'get_value',
+      inputSchema: { key: 'string' },
+      async handler({ key }, ctx) {
+        return { value: ctx.state.store[key] ?? null, totalUpdates: ctx.state.counter };
+      }
+    });
+
+    await app.start();
+
+    const setResult = await app.callTool('set_value', { key: 'session_token', value: 'xyz123' });
+    expect(setResult.data).toEqual({ stored: true, count: 1 });
+
+    const getResult = await app.callTool('get_value', { key: 'session_token' });
+    expect(getResult.data).toEqual({ value: 'xyz123', totalUpdates: 1 });
+
+    await app.stop();
+  });
+
+  it('injects both user context and tool extras (signal, callTool, reportProgress) to handlers', async () => {
+    const app = createMcpServer({
+      name: 'capability-injection-app',
+      dataDir: testDir,
+      context: () => ({ envName: 'staging' })
+    });
+
+    let inspectedContext: any = null;
+    let hasSignal = false;
+    let hasCallTool = false;
+    let hasReportProgress = false;
+
+    app.tool({
+      name: 'inspect_capabilities',
+      async handler(_args, ctx, extra) {
+        inspectedContext = ctx;
+        hasSignal = Boolean(ctx?.signal || extra?.signal);
+        hasCallTool = typeof (ctx?.callTool || extra?.callTool) === 'function';
+        hasReportProgress = typeof (ctx?.reportProgress || extra?.reportProgress) === 'function';
+        return 'inspected';
+      }
+    });
+
+    await app.start();
+    const res = await app.callTool('inspect_capabilities', {});
+    expect(res.data).toBe('inspected');
+    expect(inspectedContext.envName).toBe('staging');
+    expect(hasSignal).toBe(true);
+    expect(hasCallTool).toBe(true);
+    expect(hasReportProgress).toBe(true);
+
+    await app.stop();
+  });
+
+  it('supports context returning primitive values or null gracefully', async () => {
+    const { ContextManager } = await import('../src/server/context.js');
+
+    const primitiveManager = new ContextManager(async () => 12345);
+    const primResult = await primitiveManager.initialize();
+    expect(primResult).toBe(12345);
+    expect(primitiveManager.getContext()).toBe(12345);
+
+    const nullManager = new ContextManager(async () => null);
+    const nullResult = await nullManager.initialize();
+    expect(nullResult).toBeNull();
+    expect(nullManager.getContext()).toBeNull();
+  });
+
+  it('shares context across inter-tool calls without re-initializing or losing state', async () => {
+    const app = createMcpServer({
+      name: 'inter-tool-ctx-app',
+      dataDir: testDir,
+      context: () => ({ prefix: '>> ', sequence: 100 })
+    });
+
+    app.tool({
+      name: 'inner_tool',
+      inputSchema: { msg: 'string' },
+      async handler({ msg }, ctx) {
+        return `${ctx.prefix}${msg} (${ctx.sequence})`;
+      }
+    });
+
+    app.tool({
+      name: 'outer_tool',
+      inputSchema: { input: 'string' },
+      async handler({ input }, _ctx, { callTool }) {
+        const inner = await callTool('inner_tool', { msg: input });
+        return { transformed: inner.data };
+      }
+    });
+
+    await app.start();
+    const result = await app.callTool('outer_tool', { input: 'hello' });
+    expect(result.data).toEqual({ transformed: '>> hello (100)' });
+    await app.stop();
+  });
+
+  it('returns empty object when getContext is called on ContextManager without factory', async () => {
+    const { ContextManager } = await import('../src/server/context.js');
+    const noFactory = new ContextManager();
+    // Before initialization, if no factory exists, getContext returns undefined/cached
+    expect(noFactory.getContext()).toBeUndefined();
+    await noFactory.initialize();
+    expect(noFactory.getContext()).toEqual({});
+  });
+
+  it('preserves context object identity when accessed synchronously via app.contextManager', async () => {
+    const initialObj = { initializedAt: new Date().toISOString(), tags: ['prod', 'v1'] };
+    const app = createMcpServer({
+      name: 'identity-app',
+      dataDir: testDir,
+      context: () => initialObj
+    });
+
+    await app.start();
+    const ctx = app.contextManager.getContext();
+    expect(ctx).toBe(initialObj);
+    expect(ctx.tags).toContain('prod');
+    await app.stop();
+  });
 });

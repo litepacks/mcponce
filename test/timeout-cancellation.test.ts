@@ -293,19 +293,27 @@ describe('Timeout, Cancellation, and Error Handling', () => {
 
     let toolSignalAborted = false;
 
+    let onToolStarted: () => void;
+    const toolStartedPromise = new Promise<void>((r) => { onToolStarted = r; });
+    let onToolAborted: () => void;
+    const toolAbortedPromise = new Promise<void>((r) => { onToolAborted = r; });
+
     app.tool({
       name: 'long_cancellable_task',
       inputSchema: {},
       handler: async (args, { signal }) => {
+        onToolStarted?.();
         return new Promise((resolve) => {
           let timer: NodeJS.Timeout;
           if (signal?.aborted) {
             toolSignalAborted = true;
+            onToolAborted?.();
             return resolve('aborted');
           }
           signal?.addEventListener('abort', () => {
             toolSignalAborted = true;
             clearTimeout(timer);
+            onToolAborted?.();
             resolve('aborted');
           });
           timer = setTimeout(() => resolve('finished successfully'), 2000);
@@ -357,8 +365,8 @@ describe('Timeout, Cancellation, and Error Handling', () => {
         })
       }).catch(() => {});
 
-      // 3. Wait 50ms, then send notifications/cancelled for requestId: 99
-      await new Promise((r) => setTimeout(r, 50));
+      // 3. Wait until handler has actually started, then send notifications/cancelled for requestId: 99
+      await toolStartedPromise;
       await fetch(`${baseUrl}/mcp`, {
         method: 'POST',
         headers: {
@@ -377,7 +385,10 @@ describe('Timeout, Cancellation, and Error Handling', () => {
       });
 
       // 4. Wait for cancellation to propagate into the tool's handler
-      await new Promise((r) => setTimeout(r, 60));
+      await Promise.race([
+        toolAbortedPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out waiting for abort signal')), 2000))
+      ]);
       expect(toolSignalAborted).toBe(true);
     } finally {
       await app.stop();

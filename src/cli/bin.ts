@@ -175,7 +175,7 @@ export async function cleanRegistry() {
   console.log(`Removed ${removed} stopped server(s) from registry.`);
 }
 
-export function findLocalServerScript(): string | null {
+export function findLocalServerScript(cwd: string = process.cwd()): string | null {
   const candidates = [
     'index.js',
     'server.js',
@@ -187,7 +187,7 @@ export function findLocalServerScript(): string | null {
     'server.ts'
   ];
   for (const c of candidates) {
-    const p = path.resolve(process.cwd(), c);
+    const p = path.resolve(cwd, c);
     if (fs.existsSync(p) && fs.statSync(p).isFile()) {
       return c;
     }
@@ -199,7 +199,9 @@ export function extractServerNameFromEntrypoint(entrypointPath: string): string 
   try {
     if (fs.existsSync(entrypointPath) && fs.statSync(entrypointPath).isFile()) {
       const content = fs.readFileSync(entrypointPath, 'utf-8');
-      const match = content.match(/name\s*:\s*['"`]([^'"`]+)['"`]/);
+      const match =
+        content.match(/name\s*:\s*['"`]([^'"`]+)['"`]/) ||
+        content.match(/createMcpServer\s*\(\s*['"`]([^'"`]+)['"`]/);
       if (match && match[1]) {
         return match[1];
       }
@@ -247,7 +249,11 @@ export async function parseMcpResponse(res: any): Promise<any> {
         }
       }
     }
-    return JSON.parse(text);
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { raw: text };
+    }
   }
   try {
     return await res.json();
@@ -255,9 +261,15 @@ export async function parseMcpResponse(res: any): Promise<any> {
     const text = await res.text();
     const dataLine = text.split('\n').find((l: string) => l.startsWith('data: '));
     if (dataLine) {
-      return JSON.parse(dataLine.slice(6).trim());
+      try {
+        return JSON.parse(dataLine.slice(6).trim());
+      } catch {}
     }
-    return JSON.parse(text);
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { raw: text };
+    }
   }
 }
 

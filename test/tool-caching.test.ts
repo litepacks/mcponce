@@ -379,5 +379,72 @@ describe('In-Memory Tool Response Caching', () => {
         await app.stop();
       }
     });
+
+    it('generateKey respects custom keyGenerator function', () => {
+      const cache = new ToolCacheManager();
+      const customKey = cache.generateKey(
+        'lookup_user',
+        { userId: 42, session: 'temp123' },
+        { keyGenerator: (args) => `user_${args.userId}` }
+      );
+      expect(customKey).toBe('tool:lookup_user:user_42');
+    });
+
+    it('clear(toolName) selectively removes only the target tool entries', () => {
+      const cache = new ToolCacheManager();
+      const dummyRes: any = { content: [], data: 'ok', text: 'ok' };
+
+      cache.set('tool_a', { id: 1 }, dummyRes);
+      cache.set('tool_a', { id: 2 }, dummyRes);
+      cache.set('tool_b', { id: 1 }, dummyRes);
+
+      expect(cache.getStats().size).toBe(3);
+
+      const clearedA = cache.clear('tool_a');
+      expect(clearedA).toBe(2);
+      expect(cache.get('tool_a', { id: 1 })).toBeUndefined();
+      expect(cache.get('tool_a', { id: 2 })).toBeUndefined();
+      expect(cache.get('tool_b', { id: 1 })).toBeDefined();
+      expect(cache.getStats().size).toBe(1);
+    });
+
+    it('clear() removes all cache entries across all tools and returns count', () => {
+      const cache = new ToolCacheManager();
+      const dummyRes: any = { content: [], data: 'ok', text: 'ok' };
+
+      cache.set('tool_1', { a: 1 }, dummyRes);
+      cache.set('tool_2', { b: 2 }, dummyRes);
+      cache.set('tool_3', { c: 3 }, dummyRes);
+
+      const totalCleared = cache.clear();
+      expect(totalCleared).toBe(3);
+      expect(cache.getStats().size).toBe(0);
+    });
+
+    it('resetStats resets hits, misses, and evictions to zero', () => {
+      const cache = new ToolCacheManager();
+      const dummyRes: any = { content: [], data: 'ok', text: 'ok' };
+
+      // Generate a miss
+      cache.get('non_existent', {});
+      // Generate a hit
+      cache.set('item', {}, dummyRes);
+      cache.get('item', {});
+      // Generate an eviction
+      cache.set('item1', {}, dummyRes, { maxSize: 1 });
+      cache.set('item2', {}, dummyRes, { maxSize: 1 });
+
+      const stats = cache.getStats();
+      expect(stats.hits).toBeGreaterThan(0);
+      expect(stats.misses).toBeGreaterThan(0);
+      expect(stats.evictions).toBeGreaterThan(0);
+
+      cache.resetStats();
+      const reset = cache.getStats();
+      expect(reset.hits).toBe(0);
+      expect(reset.misses).toBe(0);
+      expect(reset.evictions).toBe(0);
+      expect(reset.size).toBe(1); // cached items are preserved
+    });
   });
 });
