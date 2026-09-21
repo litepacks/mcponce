@@ -53,10 +53,19 @@ export function normalizeInputSchema(
     return {};
   }
 
+  let effectiveSchema: Record<string, any> = schema as any;
+  if (
+    effectiveSchema instanceof z.ZodObject ||
+    (typeof effectiveSchema === 'object' && '_def' in effectiveSchema && 'shape' in effectiveSchema)
+  ) {
+    effectiveSchema =
+      typeof effectiveSchema.shape === 'function' ? effectiveSchema.shape() : effectiveSchema.shape;
+  }
+
   const normalized: Record<string, z.ZodTypeAny> = {};
   const globalCoerce = options?.coerceInputs ?? false;
 
-  for (const [key, val] of Object.entries(schema)) {
+  for (const [key, val] of Object.entries(effectiveSchema)) {
     validateParameterName(key, toolName);
 
     if (typeof val === 'string') {
@@ -125,7 +134,7 @@ export class ToolRegistry<TContext = unknown> {
       coerceInputs: shouldCoerce
     });
 
-    const hasProperties = tool.inputSchema && Object.keys(tool.inputSchema).length > 0;
+    const hasProperties = Object.keys(normalizedSchema).length > 0;
     let compiledSchema: z.ZodObject<any> | undefined;
     let compiledCoerceSchema: z.ZodObject<any> | undefined;
 

@@ -211,7 +211,7 @@ export function getParameterInfo(
   key: string,
   tool: RegisteredTool
 ): ParameterInfo {
-  const schema = tool.inputSchema;
+  const schema = tool.inputSchema as Record<string, any> | undefined;
   if (schema && typeof schema[key] === 'string') {
     return { type: schema[key] as string, required: true };
   }

@@ -1,4 +1,5 @@
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
 import {
   SubscribeRequestSchema,
   UnsubscribeRequestSchema,
@@ -581,13 +582,14 @@ export function createSessionMcpServer<TContext = unknown>(options: {
     if (argsSchema && prompt.complete) {
       const wrappedSchema: Record<string, any> = {};
       for (const [key, field] of Object.entries(argsSchema)) {
+        const zodField = typeof field === 'string' ? z.string() : field;
         if (prompt.complete[key]) {
-          wrappedSchema[key] = completable(field as any, async (val: string, context?: any) => {
+          wrappedSchema[key] = completable(zodField as any, async (val: string, context?: any) => {
             const list = await prompt.complete![key](val, context);
             return Array.isArray(list) ? list : [];
           });
         } else {
-          wrappedSchema[key] = field;
+          wrappedSchema[key] = zodField;
         }
       }
       argsSchema = wrappedSchema;

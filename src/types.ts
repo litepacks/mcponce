@@ -375,7 +375,7 @@ export type ShorthandInputSchema = Record<
   InputSchemaPropertyType | InputSchemaPropertyConfig | z.ZodTypeAny
 >;
 
-export type InputSchemaDefinition = ShorthandInputSchema | z.ZodRawShape;
+export type InputSchemaDefinition = ShorthandInputSchema | z.ZodRawShape | z.ZodObject<any>;
 
 export interface ToolCallResult<TData = any> extends CallToolResult {
   data: TData;

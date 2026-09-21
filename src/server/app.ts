@@ -597,12 +597,18 @@ export class McpApp<TContext = unknown> {
       const status: ToolInvocationStatus = isTimeout ? 'timeout' : (isCancelled ? 'cancelled' : 'error');
       const caller = callStack.length > 0 ? callStack[callStack.length - 1] : undefined;
 
+      const errorMessage =
+        error && typeof error === 'object' && 'message' in error && error.message
+          ? String(error.message)
+          : (typeof error === 'object' && error !== null ? JSON.stringify(error) : String(error));
+      const errorStack = error && typeof error === 'object' && 'stack' in error ? error.stack : undefined;
+
       this.analytics.recordInvocation({
         tool: tool.name,
         caller,
         durationMs,
         status,
-        errorMessage: error.message || String(error),
+        errorMessage,
         retries: retriesCount || (error?.retries ?? 0)
       });
       this.metrics.lastToolInvocation = {
@@ -615,8 +621,8 @@ export class McpApp<TContext = unknown> {
         durationMs,
         isTimeout,
         isCancelled,
-        error: error.message || String(error),
-        stack: error.stack
+        error: errorMessage,
+        stack: errorStack
       });
 
       if (options.throwOnError !== false) {
@@ -628,11 +634,11 @@ export class McpApp<TContext = unknown> {
         content: [
           {
             type: 'text',
-            text: `Error in tool "${tool.name}": ${error.message || String(error)}`
+            text: `Error in tool "${tool.name}": ${errorMessage}`
           }
         ],
         data: undefined as unknown as TResult,
-        text: `Error in tool "${tool.name}": ${error.message || String(error)}`
+        text: `Error in tool "${tool.name}": ${errorMessage}`
       };
     } finally {
       if (timeoutTimer) {

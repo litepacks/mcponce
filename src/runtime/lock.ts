@@ -40,15 +40,41 @@ export class LockManager {
       fs.mkdirSync(dir, { recursive: true });
     }
 
+    const lockData: LockData = {
+      pid: process.pid,
+      name,
+      createdAt: new Date().toISOString()
+    };
+    const content = JSON.stringify(lockData, null, 2);
+
+    const tmpPath = `${this.lockPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     try {
-      this.fd = fs.openSync(this.lockPath, 'wx');
-      const lockData: LockData = {
-        pid: process.pid,
-        name,
-        createdAt: new Date().toISOString()
-      };
-      fs.writeSync(this.fd, JSON.stringify(lockData, null, 2));
-      return true;
+      fs.writeFileSync(tmpPath, content);
+      try {
+        fs.linkSync(tmpPath, this.lockPath);
+        return true;
+      } catch (linkErr: any) {
+        if (linkErr.code === 'EEXIST') {
+          return false;
+        }
+        // Fallback to openSync('wx') if linkSync is unsupported on filesystem
+        try {
+          this.fd = fs.openSync(this.lockPath, 'wx');
+          fs.writeSync(this.fd, content);
+          return true;
+        } catch (openErr: any) {
+          if (openErr.code === 'EEXIST') {
+            return false;
+          }
+          throw openErr;
+        }
+      } finally {
+        try {
+          if (fs.existsSync(tmpPath)) {
+            fs.unlinkSync(tmpPath);
+          }
+        } catch {}
+      }
     } catch (err: any) {
       if (err.code === 'EEXIST') {
         return false;
