@@ -15,10 +15,14 @@
    - A built-in CLI for developers (`node server.js call <tool>`, `node server.js tools`, `node server.js analytics`).
    - A background daemon runner (integrated with Unitup / OS-level services).
    - An interactive Web Inspector UI (`/inspect`).
+   - Optional shared background service management through the runtime dependency `unitup`.
 2. **Dual-Transport Bridge**:
    `mcponce` starts an HTTP server locally and transparently bridges `stdio` to it when launched by desktop clients (Claude, Cursor). Clients share a single background process instead of spawning dozens of redundant Node.js runtimes.
 3. **Strict STDOUT Cleanliness (Rule #1 of MCP)**:
    When running over `stdio`, `process.stdout` is reserved **exclusively** for valid MCP JSON-RPC messages. Any arbitrary `console.log()` will corrupt the protocol stream and disconnect the client! Diagnostic messages must go to `logger` or `console.error`.
+
+4. **Background Mode Is Opt-In**:
+   Background mode can be enabled with `background: true`, `--background` / `-b`, or the per-call lifecycle options on `app.start()`, `app.stop()`, and `app.restart()`. Unitup is a runtime dependency (loaded only when this mode is used), not a development-only dependency. It may install an OS-managed user service; document the platform and lifecycle behavior for examples that enable it by default.
 
 ---
 
@@ -486,6 +490,8 @@ const app = createMcpServer({
 
 ## 9. Testing Guidelines for Agents
 
+The repository's test scripts build `dist/` before running Vitest. Use `npm test` for the full suite, or `npm test -- <test-file> ...` for focused coverage. Background lifecycle tests should exercise real worker processes and MCP transports where practical, while stubbing the OS service-manager boundary; avoid installing or removing real LaunchAgents/system services as part of automated tests. Cover concurrent startup, stdio disconnect behavior, crash/stale-state recovery, failed-start cleanup, and restart when changing background lifecycle code.
+
 ### Unit Testing Tools in Vitest / Node Test
 Tools can be tested in-memory without starting an HTTP daemon:
 
@@ -538,6 +544,8 @@ it('serves tools over HTTP POST /mcp', async () => {
 ## 10. Built-in CLI & Developer Workflow
 
 Every server created with `await app.run()` includes a complete CLI without any extra code:
+
+The standalone local consumer example in `examples/local-mcp-server/` is useful for validating package consumption, Codex stdio configuration, and background-service behavior. Its own README documents its commands and service cleanup; do not assume those machine-specific service effects apply to every server.
 
 ### 1. Execute Tools Directly from Terminal
 ```bash
