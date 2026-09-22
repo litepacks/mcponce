@@ -1,0 +1,29 @@
+{
+  "name": "local-mcp-server-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:framework": "npm --prefix ../.. run build",
+    "prestart": "npm run build:framework",
+    "start": "node --import tsx server.ts start",
+    "info": "node --import tsx server.ts info",
+    "stop": "node --import tsx server.ts stop",
+    "pretools": "npm run build:framework",
+    "tools": "node --import tsx server.ts tools",
+    "precall": "npm run build:framework",
+    "call": "node --import tsx server.ts call"
+  },
+  "dependencies": {
+    "mcponce": "file:../..",
+    "unitup": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

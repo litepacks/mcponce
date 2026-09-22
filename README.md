@@ -932,14 +932,7 @@ You can enable background mode in **3 convenient ways**:
   - When the initial client (e.g. Claude) disconnects, **the background server remains alive** for other clients (Cursor, Antigravity, VS Code).
   - Multiple distinct applications (e.g. `browsertrack`, `softscope`, `recallite`) each run their own independent background singleton.
 - **Source of Truth**: `mcponce` remains the sole authority for health verification, atomic locking, dynamic port discovery, and runtime metadata. Unitup is strictly an internal process-management detail.
-- **Optional Dependency**: Unitup is only loaded when background mode is active. If enabled without Unitup installed, a clear error guides the user:
-  ```text
-  Background mode requires Unitup, but Unitup is not installed.
-
-  Install it with:
-
-  npm install unitup
-  ```
+- **Runtime Dependency**: Unitup is installed with `mcponce` and loaded only when background mode is active. No separate installation is required.
 - **Logs**: Unitup stdout and stderr logs are saved directly in `app.getLogDirectory()` (`<dataDir>/logs/unitup.stdout.log`).
 
 ---
@@ -1015,4 +1008,3 @@ The central registry is stored at:
 ## License
 
 MIT
-

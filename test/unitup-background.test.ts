@@ -1,550 +1,213 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createMcpServer } from '../src/index.js';
-import { checkHealth, fetchInfo } from '../src/runtime/health.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { createMcpServer, type McpApp } from '../src/index.js';
+import { checkHealth } from '../src/runtime/health.js';
 import { StateManager } from '../src/runtime/state.js';
-import {
-  _setUnitupModule,
-  _resetUnitupModule,
-  getUnitup,
-  stopBackgroundProcess,
-  getBackgroundStatus
-} from '../src/runtime/unitup.js';
+import { LockManager } from '../src/runtime/lock.js';
+import { _setUnitupModule, _resetUnitupModule } from '../src/runtime/unitup.js';
+import { createProcessServiceManager, writeBackgroundEntrypoint } from './helpers/background-process.js';
 
-describe('Unitup Background Integration', () => {
+// Replace the OS service manager at its API boundary. Workers, stdio bridges,
+// HTTP/MCP, locks and runtime state are real; no native services are installed.
+describe('Background lifecycle with real worker processes', () => {
   let testDir: string;
-  let serverScriptPath: string;
+  let manager: ReturnType<typeof createProcessServiceManager>;
+  let apps: McpApp[];
+  let clients: Client[];
 
   beforeEach(() => {
-    testDir = path.join(os.tmpdir(), `mcp-unitup-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    fs.mkdirSync(testDir, { recursive: true });
-
-    // Create a standalone server script for Unitup to execute as entrypoint
-    serverScriptPath = path.join(testDir, 'test-server.mjs');
-    const serverScriptContent = `
-import { createMcpServer } from '${path.resolve('./dist/index.js')}';
-
-const appName = process.env.TEST_APP_NAME || 'test-bg-server';
-const dataDir = process.env.TEST_DATA_DIR || '${testDir}';
-
-let initCount = 0;
-const app = createMcpServer({
-  name: appName,
-  dataDir: dataDir,
-  port: 0,
-  background: true,
-  context: async () => {
-    initCount++;
-    return { initializedAt: Date.now(), count: initCount };
-  }
-});
-
-app.tool({
-  name: 'ping',
-  handler: (args, ctx) => {
-    return {
-      content: [{ type: 'text', text: JSON.stringify({ reply: 'pong', context: ctx }) }]
-    };
-  }
-});
-
-app.run();
-`;
-    fs.writeFileSync(serverScriptPath, serverScriptContent, 'utf-8');
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp background test '));
+    manager = createProcessServiceManager();
+    _setUnitupModule(manager.adapter);
+    apps = [];
+    clients = [];
+    for (const key of ['MCPONCE_BACKGROUND_SERVER', 'MCPONCE_API_KEY', 'MCP_API_KEY', 'MCP_TOKEN']) {
+      vi.stubEnv(key, undefined);
+    }
   });
 
   afterEach(async () => {
-    _resetUnitupModule();
-    delete process.env.TEST_APP_NAME;
-    delete process.env.TEST_DATA_DIR;
+    _setUnitupModule(manager.adapter);
     try {
+      await Promise.all(clients.map((client) => client.close()));
+      await Promise.all(apps.map((app) => app.stop()));
+    } finally {
+      await manager.dispose();
+      _resetUnitupModule();
+      vi.unstubAllEnvs();
       fs.rmSync(testDir, { recursive: true, force: true });
-    } catch {}
+    }
   });
 
-  // Test 1: background omitted uses the existing native behavior
-  it('1. uses existing native startup behavior when background is omitted', async () => {
+  function makeApp(name: string, background = true) {
+    const dataDir = path.join(testDir, name);
+    const entrypoint = writeBackgroundEntrypoint(name, dataDir);
     const app = createMcpServer({
-      name: 'bg-omitted-test',
-      dataDir: testDir,
-      port: 0
+      name, dataDir, entrypoint, background,
+      host: '127.0.0.1', port: 0, registerInCentral: false,
+      logging: { directory: path.join(dataDir, 'logs') }
     });
+    apps.push(app);
+    return app;
+  }
 
-    expect(app.config.background).toBe(false);
+  function makeClient() {
+    const client = new Client({ name: 'background-lifecycle-test', version: '1.0.0' });
+    clients.push(client);
+    return client;
+  }
 
-    const startResult = await app.start();
-    expect(startResult.role).toBe('owner');
-    expect(startResult.reused).toBe(false);
-    expect(startResult.port).toBeGreaterThan(0);
+  async function ping(client: Client) {
+    const result = await client.callTool({ name: 'ping', arguments: {} });
+    expect(result.isError).not.toBe(true);
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(content[0].type).toBe('text');
+    return JSON.parse(content[0].text) as { pid: number; initializations: number; calls: number };
+  }
 
-    const health = await checkHealth('127.0.0.1', startResult.port, 'bg-omitted-test');
-    expect(health?.ok).toBe(true);
-
+  it('starts a separate worker and removes its process, state and lock on stop', async () => {
+    const app = makeApp('bg-start-stop');
+    const started = await app.start();
+    expect(started.reused).toBe(false);
+    expect(started.pid).not.toBe(process.pid);
+    expect(await checkHealth(started.host, started.port, app.config.name)).toMatchObject({ ok: true, pid: started.pid });
+    expect(await manager.adapter.status('mcponce-bg-start-stop')).toMatchObject({
+      installed: true, running: true, pid: started.pid
+    });
     await app.stop();
+    expect(await checkHealth(started.host, started.port, app.config.name)).toBeNull();
+    expect(new StateManager(app.config.dataDir).read()).toBeNull();
+    expect(new LockManager(app.config.dataDir).hasLockFile()).toBe(false);
+    expect(await manager.adapter.status('mcponce-bg-start-stop')).toMatchObject({ installed: false });
   });
 
-  // Test 2: background: false uses the existing native behavior
-  it('2. uses existing native startup behavior when background is explicitly false', async () => {
-    const app = createMcpServer({
-      name: 'bg-false-test',
-      background: false,
-      dataDir: testDir,
-      port: 0
-    });
-
-    expect(app.config.background).toBe(false);
-
-    const startResult = await app.start();
-    expect(startResult.role).toBe('owner');
-    expect(startResult.reused).toBe(false);
-
-    await app.stop();
+  it('starts exactly one worker for ten concurrent clients and reuses it afterward', async () => {
+    const concurrentApps = Array.from({ length: 10 }, () => makeApp('bg-concurrent'));
+    const results = await Promise.all(concurrentApps.map((app) => app.start()));
+    expect(new Set(results.map((result) => result.pid)).size).toBe(1);
+    expect(new Set(results.map((result) => result.port)).size).toBe(1);
+    expect(manager.adapter.install).toHaveBeenCalledTimes(1);
+    const reused = await makeApp('bg-concurrent').start();
+    expect(reused).toMatchObject({ reused: true, role: 'bridge', pid: results[0].pid, port: results[0].port });
+    expect(manager.adapter.install).toHaveBeenCalledTimes(1);
   });
 
-  // Test 3: background: true starts the shared server through Unitup
-  it('3. starts the shared server through Unitup when background is true', async () => {
-    const appName = 'bg-true-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    const app = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    expect(app.config.background).toBe(true);
-
-    try {
-      const startResult = await app.start();
-      expect(startResult.role).toBe('owner');
-      expect(startResult.port).toBeGreaterThan(0);
-
-      // Verify health on the background server
-      const health = await checkHealth('127.0.0.1', startResult.port, appName);
-      expect(health?.ok).toBe(true);
-      expect(health?.name).toBe(appName);
-
-      // Unitup service should be registered
-      const unitupStatus = await getBackgroundStatus(appName);
-      expect(unitupStatus).not.toBeNull();
-      expect(unitupStatus?.installed).toBe(true);
-    } finally {
-      await app.stop();
-    }
-  });
-
-  // Test 4: a second client reuses the same background instance
-  it('4. reuses the existing background instance when a second client starts', async () => {
-    const appName = 'bg-reuse-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    const client1 = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    const client2 = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    try {
-      const res1 = await client1.start();
-      expect(res1.reused).toBe(false);
-
-      const res2 = await client2.start();
-      expect(res2.reused).toBe(true);
-      expect(res2.role).toBe('bridge');
-      expect(res2.port).toBe(res1.port);
-      expect(res2.pid).toBe(res1.pid);
-    } finally {
-      await client1.stop();
-    }
-  });
-
-  // Test 5: 10 concurrent clients still result in one shared process
-  it('5. coordinates 10 concurrent client start requests to one shared background instance', async () => {
-    const appName = 'bg-concurrent-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    const apps = Array.from({ length: 10 }, () =>
-      createMcpServer({
-        name: appName,
-        background: true,
-        entrypoint: serverScriptPath,
-        dataDir: testDir,
-        port: 0
-      })
-    );
-
-    try {
-      const results = await Promise.all(apps.map((a) => a.start()));
-      const firstPort = results[0].port;
-      const firstPid = results[0].pid;
-
-      for (const res of results) {
-        expect(res.port).toBe(firstPort);
-        expect(res.pid).toBe(firstPid);
-      }
-
-      const health = await checkHealth('127.0.0.1', firstPort, appName);
-      expect(health?.ok).toBe(true);
-    } finally {
-      await apps[0].stop();
-    }
-  });
-
-  // Test 6: shared application context initializes exactly once
-  it('6. initializes shared application context exactly once across background sessions', async () => {
-    const appName = 'bg-context-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    const client = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    try {
-      const res = await client.start();
-      const baseUrl = `http://${res.host}:${res.port}`;
-
-      // Call initialize and call tool
-      const initRes = await fetch(`${baseUrl}/mcp`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json, text/event-stream'
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'initialize',
-          params: {
-            protocolVersion: '2024-11-05',
-            capabilities: {},
-            clientInfo: { name: 'client-1', version: '1.0.0' }
-          }
-        })
+  it('keeps the worker and context alive after a real stdio client disconnects', async () => {
+    const app = makeApp('bg-stdio');
+    const started = await app.start();
+    async function connectBridge() {
+      const client = makeClient();
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [app.config.entrypoint!],
+        env: { MCPONCE_BACKGROUND_SERVER: '0', NODE_ENV: 'test' },
+        stderr: 'pipe'
       });
-      const sid = initRes.headers.get('mcp-session-id')!;
-
-      const toolRes = await fetch(`${baseUrl}/mcp`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json, text/event-stream',
-          'mcp-session-id': sid
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 2,
-          method: 'tools/call',
-          params: { name: 'ping', arguments: {} }
-        })
-      });
-      const text = await toolRes.text();
-      const match = text.match(/data:\s*(\{.*\})/);
-      const data = match ? JSON.parse(match[1]) : JSON.parse(text);
-      const toolOutput = JSON.parse(data.result.content[0].text);
-
-      // Context was initialized once
-      expect(toolOutput.context.count).toBe(1);
-    } finally {
-      await client.stop();
+      transport.stderr?.on('data', () => {});
+      await client.connect(transport);
+      expect(transport.pid).not.toBe(started.pid);
+      return { client, transport };
     }
+    const first = await connectBridge();
+    expect(await ping(first.client)).toEqual({ pid: started.pid, initializations: 1, calls: 1 });
+    const bridgePid = first.transport.pid!;
+    await first.client.close();
+    await expect.poll(() => {
+      try { process.kill(bridgePid, 0); return false; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+    }).toBe(true);
+    expect(await checkHealth(started.host, started.port, app.config.name)).toMatchObject({ pid: started.pid });
+    const second = await connectBridge();
+    expect(await ping(second.client)).toEqual({ pid: started.pid, initializations: 1, calls: 2 });
+    expect(manager.adapter.install).toHaveBeenCalledTimes(1);
   });
 
-  // Test 7: closing the first stdio process does not terminate the background server
-  it('7. keeps the background server running when an initial client disconnects', async () => {
-    const appName = 'bg-keepalive-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
+  it('shares one initialized context across independent HTTP MCP sessions', async () => {
+    const app = makeApp('bg-http-context');
+    const started = await app.start();
+    const endpoint = new URL(`http://${started.host}:${started.port}/mcp`);
+    const first = makeClient();
+    const second = makeClient();
+    await first.connect(new StreamableHTTPClientTransport(endpoint));
+    await second.connect(new StreamableHTTPClientTransport(endpoint));
+    expect(await ping(first)).toEqual({ pid: started.pid, initializations: 1, calls: 1 });
+    expect(await ping(second)).toEqual({ pid: started.pid, initializations: 1, calls: 2 });
+  });
 
-    const client1 = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
+  it('recovers the stale lock and state left by an actual worker crash', async () => {
+    const app = makeApp('bg-crash');
+    const first = await app.start();
+    await manager.crash('mcponce-bg-crash');
+    expect(new StateManager(app.config.dataDir).read()?.pid).toBe(first.pid);
+    expect(new LockManager(app.config.dataDir).hasLockFile()).toBe(true);
+    expect(await checkHealth(first.host, first.port, app.config.name)).toBeNull();
+    const recovered = await app.start();
+    expect(recovered.pid).not.toBe(first.pid);
+    expect(recovered.reused).toBe(false);
+    expect(manager.adapter.install).toHaveBeenCalledTimes(2);
+    expect(await checkHealth(recovered.host, recovered.port, app.config.name)).toMatchObject({ pid: recovered.pid });
+  });
 
+  it('releases the startup lock on installation failure so a retry can succeed', async () => {
+    const app = makeApp('bg-install-failure');
+    manager.adapter.install.mockRejectedValueOnce(new Error('Service manager unavailable'));
+    await expect(app.start()).rejects.toThrow('Service manager unavailable');
+    expect(new LockManager(app.config.dataDir).hasLockFile()).toBe(false);
+    expect(new StateManager(app.config.dataDir).read()).toBeNull();
+    const retried = await app.start();
+    expect(await checkHealth(retried.host, retried.port, app.config.name)).toMatchObject({ ok: true });
+    expect(manager.adapter.install).toHaveBeenCalledTimes(2);
+  });
+
+  it('restarts with a new worker PID and fresh application context', async () => {
+    const app = makeApp('bg-restart');
+    const first = await app.start();
+    const client = makeClient();
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://${first.host}:${first.port}/mcp`)));
+    expect((await ping(client)).calls).toBe(1);
+    await client.close();
+    const restarted = await app.restart();
+    expect(restarted.pid).not.toBe(first.pid);
+    const newClient = makeClient();
+    await newClient.connect(new StreamableHTTPClientTransport(new URL(`http://${restarted.host}:${restarted.port}/mcp`)));
+    expect(await ping(newClient)).toEqual({ pid: restarted.pid, initializations: 1, calls: 1 });
+    expect(manager.adapter.install).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps distinct servers isolated when one is stopped', async () => {
+    const first = makeApp('bg-isolated-a');
+    const second = makeApp('bg-isolated-b');
+    const [a, b] = await Promise.all([first.start(), second.start()]);
+    expect(a.port).not.toBe(b.port);
+    expect(a.pid).not.toBe(b.pid);
+    expect(await checkHealth(b.host, b.port, first.config.name)).toBeNull();
+    await first.stop();
+    expect(await checkHealth(a.host, a.port, first.config.name)).toBeNull();
+    expect(await checkHealth(b.host, b.port, second.config.name)).toMatchObject({ pid: b.pid });
+  });
+
+  it('supports a per-start background override on a foreground-configured app', async () => {
+    const app = makeApp('bg-override', false);
     try {
-      const res1 = await client1.start();
-      expect(res1.port).toBeGreaterThan(0);
-
-      // Client 1 stops its local representation (without calling app.stop())
-      // The background server must continue responding to /health
-      const healthBefore = await checkHealth('127.0.0.1', res1.port, appName);
-      expect(healthBefore?.ok).toBe(true);
-
-      // Client 2 connects
-      const client2 = createMcpServer({
-        name: appName,
-        background: true,
-        entrypoint: serverScriptPath,
-        dataDir: testDir,
-        port: 0
-      });
-
-      const res2 = await client2.start();
-      expect(res2.reused).toBe(true);
-      expect(res2.port).toBe(res1.port);
-    } finally {
-      await client1.stop();
-    }
-  });
-
-  // Test 8: stale runtime metadata is recovered
-  it('8. recovers from stale runtime metadata when starting background server', async () => {
-    const appName = 'bg-stale-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    const stateManager = new StateManager(testDir);
-    // Write stale runtime state with dead PID and dead port
-    stateManager.write({
-      name: appName,
-      version: '1.0.0',
-      pid: 9999997,
-      port: 59997,
-      host: '127.0.0.1',
-      startedAt: new Date().toISOString()
-    });
-
-    const app = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    try {
-      const startResult = await app.start();
-      expect(startResult.port).not.toBe(59997);
-      expect(startResult.pid).not.toBe(9999997);
-
-      const health = await checkHealth('127.0.0.1', startResult.port, appName);
-      expect(health?.ok).toBe(true);
-    } finally {
-      await app.stop();
-    }
-  });
-
-  // Test 9: a crashed Unitup-managed process can be restarted
-  it('9. restarts a background server using app.restart()', async () => {
-    const appName = 'bg-restart-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    const app = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    try {
-      const firstStart = await app.start();
-      const firstPort = firstStart.port;
-
-      const restarted = await app.restart();
-      expect(restarted.port).toBeGreaterThan(0);
-
-      const health = await checkHealth('127.0.0.1', restarted.port, appName);
-      expect(health?.ok).toBe(true);
-    } finally {
-      await app.stop();
-    }
-  });
-
-  // Test 10: /health remains the final source of readiness
-  it('10. verifies that /health is the authoritative source of readiness', async () => {
-    const appName = 'bg-health-authority-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    const app = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    try {
-      const res = await app.start();
-      // Health check with wrong expected name must fail
-      const badHealth = await checkHealth('127.0.0.1', res.port, 'completely-different-name');
-      expect(badHealth).toBeNull();
-
-      // Health check with correct expected name succeeds
-      const goodHealth = await checkHealth('127.0.0.1', res.port, appName);
-      expect(goodHealth?.ok).toBe(true);
-    } finally {
-      await app.stop();
-    }
-  });
-
-  // Test 11: multiple MCP applications can run simultaneously without conflict
-  it('11. runs multiple distinct background MCP applications simultaneously (browsertrack, softscope, recallite)', async () => {
-    const apps = ['browsertrack', 'softscope', 'recallite'].map((name) => {
-      const appDir = path.join(testDir, name);
-      fs.mkdirSync(appDir, { recursive: true });
-
-      const scriptPath = path.join(appDir, 'server.mjs');
-      fs.writeFileSync(
-        scriptPath,
-        `
-import { createMcpServer } from '${path.resolve('./dist/index.js')}';
-const app = createMcpServer({
-  name: '${name}',
-  dataDir: '${appDir}',
-  port: 0,
-  background: true
-});
-app.run();
-`,
-        'utf-8'
-      );
-
-      return createMcpServer({
-        name,
-        background: true,
-        entrypoint: scriptPath,
-        dataDir: appDir,
-        port: 0
-      });
-    });
-
-    try {
-      const results = await Promise.all(apps.map((a) => a.start()));
-
-      expect(results.length).toBe(3);
-      // All 3 apps must have unique ports
-      const ports = results.map((r) => r.port);
-      const uniquePorts = new Set(ports);
-      expect(uniquePorts.size).toBe(3);
-
-      // Verify all 3 respond to health check with their respective names
-      for (let i = 0; i < apps.length; i++) {
-        const h = await checkHealth('127.0.0.1', results[i].port, apps[i].config.name);
-        expect(h?.ok).toBe(true);
-        expect(h?.name).toBe(apps[i].config.name);
-      }
-    } finally {
-      await Promise.all(apps.map((a) => a.stop()));
-    }
-  });
-
-  // Test 12: Unitup logs are available through app.getLogDirectory()
-  it('12. makes Unitup logs available in app.getLogDirectory()', async () => {
-    const appName = 'bg-log-dir-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    const app = createMcpServer({
-      name: appName,
-      background: true,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    const logDir = await app.getLogDirectory();
-    expect(logDir).toBe(app.config.logDir);
-
-    try {
-      await app.start();
-
-      // Check that the log directory exists
-      expect(fs.existsSync(logDir)).toBe(true);
-    } finally {
-      await app.stop();
-    }
-  });
-
-  // Test 13: a clear error is returned when background: true is used without Unitup
-  it('13. returns a clear error when background: true is used but Unitup is not installed', async () => {
-    _setUnitupModule(null); // Simulate Unitup not installed
-
-    const app = createMcpServer({
-      name: 'bg-missing-unitup-test',
-      background: true,
-      dataDir: testDir,
-      port: 0
-    });
-
-    await expect(app.start()).rejects.toThrow(
-      'Background mode requires Unitup, but Unitup is not installed.\n\nInstall it with:\n\nnpm install unitup'
-    );
-  });
-
-  // Test 14: allows single string parameter initialization
-  it('14. allows single string parameter initialization createMcpServer("server-name")', () => {
-    const app = createMcpServer('single-param-app');
-    expect(app.config.name).toBe('single-param-app');
-    expect(app.config.version).toBe('1.0.0');
-    expect(app.config.background).toBe(false);
-  });
-
-  // Test 15: supports programmatic start({ background: true })
-  it('15. supports programmatic start({ background: true }) when background was not in config', async () => {
-    const appName = 'bg-prog-test';
-    process.env.TEST_APP_NAME = appName;
-    process.env.TEST_DATA_DIR = testDir;
-
-    // Server defined without background: true in config
-    const app = createMcpServer({
-      name: appName,
-      background: false,
-      entrypoint: serverScriptPath,
-      dataDir: testDir,
-      port: 0
-    });
-
-    try {
-      const result = await app.start({ background: true });
-      expect(result.role).toBe('owner');
-      expect(result.port).toBeGreaterThan(0);
-
-      const health = await checkHealth('127.0.0.1', result.port, appName, 1000);
-      expect(health?.ok).toBe(true);
+      const started = await app.start({ background: true });
+      expect(started.pid).not.toBe(process.pid);
+      expect(await checkHealth(started.host, started.port, app.config.name)).toMatchObject({ ok: true });
     } finally {
       await app.stop({ background: true });
     }
   });
 
-  // Test 16: supports CLI --background and -b options
-  it('16. parses --background and -b CLI options in handleCliArgs', async () => {
-    const { handleCliArgs } = await import('../src/cli/index.js');
-    const app = createMcpServer('test-cli-bg');
-
-    const opts1 = await handleCliArgs(['--background'], app.config, app);
-    expect(opts1.background).toBe(true);
-
-    const opts2 = await handleCliArgs(['-b'], app.config, app);
-    expect(opts2.background).toBe(true);
-
-    const opts3 = await handleCliArgs([], app.config, app);
-    expect(opts3.background).toBe(false);
+  it('fails before creating runtime state if the service manager cannot be loaded', async () => {
+    const app = makeApp('bg-missing-manager');
+    _setUnitupModule(null);
+    await expect(app.start()).rejects.toThrow('Background mode requires Unitup');
+    expect(manager.adapter.install).not.toHaveBeenCalled();
+    expect(new LockManager(app.config.dataDir).hasLockFile()).toBe(false);
+    expect(new StateManager(app.config.dataDir).read()).toBeNull();
   });
 });

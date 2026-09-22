@@ -20,8 +20,11 @@
   ],
   "scripts": {
     "build": "tsc",
+    "pretest": "npm run build",
     "test": "vitest run",
+    "pretest:watch": "npm run build",
     "test:watch": "vitest",
+    "pretest:coverage": "npm run build",
     "test:coverage": "vitest run --coverage",
     "bench": "vitest bench --run",
     "docs:dev": "docboot docs",
@@ -44,6 +47,7 @@
     "@hono/node-server": "^1.13.8",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "hono": "^4.7.4",
+    "unitup": "^0.2.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
@@ -52,7 +56,6 @@
     "docboot": "^0.3.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
-    "unitup": "^0.2.0",
     "vitest": "^3.0.8"
   },
   "engines": {
