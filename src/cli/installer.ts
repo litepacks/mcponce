@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-export type SupportedClient = 'claude' | 'cursor' | 'antigravity' | 'all';
+export type SupportedClient = 'claude' | 'cursor' | 'antigravity' | 'vscode' | 'windsurf' | 'all';
 
 export interface ClientTargetInfo {
   name: string;
@@ -91,11 +91,41 @@ export function getClientConfigPath(client: string, project = false): string {
     return path.join(configHome, 'Cursor', 'User', 'globalStorage', 'mcp.json');
   }
 
+  if (c === 'vscode' || c === 'code') {
+    if (project) {
+      return path.resolve(process.cwd(), '.vscode', 'mcp.json');
+    }
+    if (platform === 'darwin') {
+      return path.join(
+        home,
+        'Library',
+        'Application Support',
+        'Code',
+        'User',
+        'globalStorage',
+        'mcp.json'
+      );
+    }
+    if (platform === 'win32') {
+      const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+      return path.join(appData, 'Code', 'User', 'globalStorage', 'mcp.json');
+    }
+    const configHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    return path.join(configHome, 'Code', 'User', 'globalStorage', 'mcp.json');
+  }
+
+  if (c === 'windsurf') {
+    if (project) {
+      return path.resolve(process.cwd(), '.codeium', 'windsurf', 'mcp_config.json');
+    }
+    return path.join(home, '.codeium', 'windsurf', 'mcp_config.json');
+  }
+
   if (c === 'antigravity') {
     return path.join(home, '.gemini', 'antigravity-ide', 'mcp_config.json');
   }
 
-  throw new Error(`Unsupported client: "${client}". Supported clients: claude, cursor, antigravity, all`);
+  throw new Error(`Unsupported client: "${client}". Supported clients: claude, cursor, vscode, windsurf, antigravity, all`);
 }
 
 /**

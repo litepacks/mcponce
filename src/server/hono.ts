@@ -529,6 +529,18 @@ export function createHonoApp<TContext = unknown>(options: {
       return c.text('Invalid or missing session ID', 400);
     }
     const session = sessions.get(sessionId)!;
+
+    // Detect client disconnect/abort for the active SSE session to prevent zombie sessions
+    c.req.raw.signal.addEventListener('abort', () => {
+      if (sessions.has(sessionId)) {
+        sessions.delete(sessionId);
+        subscriptionRegistry?.removeSession(sessionId);
+        metrics.activeSessions = sessions.size;
+        logger?.info('client:disconnect', { session: sessionId, reason: 'stream_aborted' });
+        onSessionClosed?.(sessionId);
+      }
+    });
+
     return session.transport.handleRequest(c.req.raw);
   });
 

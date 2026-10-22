@@ -409,6 +409,8 @@ app.tool({
     initialDelayMs: 200,
     maxDelayMs: 2000,
     backoffFactor: 2,
+    jitter: true, // Equal jitter to prevent thundering herd (or number e.g. 0.2)
+    respectRetryAfter: true, // Respect HTTP 429/503 Retry-After headers automatically
     retryableErrors: (err) => err.message.includes('503') || err.message.includes('ECONNRESET')
   },
   async handler({ id }) {

@@ -81,19 +81,22 @@ export async function startStdioProxy(
       logger?.error('Error forwarding message from stdio to http', {
         error: err.message || String(err)
       });
-      // Prevent client from hanging indefinitely on error
-      const reqId = (msg as any)?.id;
-      if (reqId !== undefined && reqId !== null) {
-        try {
-          await stdioTransport.send({
-            jsonrpc: '2.0',
-            id: reqId,
-            error: {
-              code: -32603,
-              message: `Bridge failed to forward request: ${err.message || String(err)}`
-            }
-          });
-        } catch {}
+      // Prevent client from hanging indefinitely on error (supporting both single and batch requests)
+      const messages = Array.isArray(msg) ? msg : [msg];
+      for (const item of messages) {
+        const reqId = (item as any)?.id;
+        if (reqId !== undefined && reqId !== null) {
+          try {
+            await stdioTransport.send({
+              jsonrpc: '2.0',
+              id: reqId,
+              error: {
+                code: -32603,
+                message: `Bridge failed to forward request: ${err.message || String(err)}`
+              }
+            });
+          } catch {}
+        }
       }
     }
   };
@@ -125,9 +128,8 @@ export async function startStdioProxy(
     logger?.error('HTTP client transport error', { error: err.message || String(err) });
   };
 
-  // Start both transports
-  await httpTransport.start();
-  await stdioTransport.start();
+  // Start both transports concurrently
+  await Promise.all([httpTransport.start(), stdioTransport.start()]);
 
   logger?.debug('Stdio proxy successfully started', { mcpUrl });
 

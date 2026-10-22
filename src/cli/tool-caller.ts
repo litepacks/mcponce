@@ -424,6 +424,7 @@ export async function executeCliToolCall(
       timeoutMs: parsed.timeoutMs,
       noCache: parsed.noCache,
       throwOnError: false,
+      coerceInputs: true,
       onProgress,
       auth: authIdentity
     });

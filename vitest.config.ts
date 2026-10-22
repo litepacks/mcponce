@@ -1,6 +1,10 @@
 import { defineConfig } from 'vitest/config';
+import { softscopeVitest } from 'softscope/vitest';
 
 export default defineConfig({
+  plugins: [softscopeVitest({
+    json: 'softscope-report.json'
+  })],
   test: {
     globals: true,
     environment: 'node',

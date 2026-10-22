@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -37,10 +37,19 @@ describe('mcponce CLI Binary Runner (src/cli/bin.ts)', () => {
   let consoleErrorSpy: any;
   let processExitSpy: any;
 
-  beforeEach(() => {
+  beforeAll(() => {
     tmpDir = path.join(os.tmpdir(), `mcp-bin-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     fs.mkdirSync(tmpDir, { recursive: true });
-    registryFile = path.join(tmpDir, 'servers.json');
+  });
+
+  afterAll(() => {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {}
+  });
+
+  beforeEach(() => {
+    registryFile = path.join(tmpDir, `servers-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
     registry = new CentralRegistry(registryFile);
     setRegistry(registry);
@@ -59,7 +68,6 @@ describe('mcponce CLI Binary Runner (src/cli/bin.ts)', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   describe('pad & formatStatus & printHelp', () => {

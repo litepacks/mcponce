@@ -5,18 +5,6 @@ import { matchesFilter, composeMiddleware, MiddlewareManager } from '../src/util
 describe('Lightweight Middleware / Interceptors (app.use)', () => {
   let app: McpApp;
 
-  beforeEach(() => {
-    app = createMcpServer({
-      name: 'test-middleware-server',
-      version: '1.0.0',
-      port: 0
-    });
-  });
-
-  afterEach(async () => {
-    await app.stop({ force: true });
-  });
-
   describe('matchesFilter utility unit tests', () => {
     it('matches wildcard asterisks and exact strings correctly', () => {
       expect(matchesFilter(undefined, 'any_tool')).toBe(true);
@@ -82,8 +70,22 @@ describe('Lightweight Middleware / Interceptors (app.use)', () => {
     });
   });
 
-  describe('McpApp.use() Integration with app.callTool', () => {
-    it('executes global middleware and supports method chaining', async () => {
+  describe('Server Middleware Integration', () => {
+    beforeEach(() => {
+      app = createMcpServer({
+        name: 'test-middleware-server',
+        version: '1.0.0',
+        port: 0,
+        registerInCentral: false
+      });
+    });
+
+    afterEach(async () => {
+      await app.stop({ force: true });
+    });
+
+    describe('McpApp.use() Integration with app.callTool', () => {
+      it('executes global middleware and supports method chaining', async () => {
       const trace: string[] = [];
 
       const chain = app
@@ -400,6 +402,7 @@ describe('Lightweight Middleware / Interceptors (app.use)', () => {
       expect(json.result.text).toContain('"injectedByMiddleware":true');
       expect(json.result.text).toContain('"enrichedByMiddleware":true');
     });
+  });
   });
 
   describe('Middleware Edge Cases & Manager Unit Tests', () => {

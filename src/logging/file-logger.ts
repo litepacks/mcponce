@@ -31,7 +31,7 @@ export class FileLoggerWriter {
   private logDir: string;
   private currentLogPath: string;
   private retentionDays: number;
-  private lastRotationCheck = 0;
+  private lastRotationCheck = Date.now();
   private dirEnsured = false;
   private cachedDateStr = '';
   private cachedDailyLogPath = '';
@@ -94,9 +94,6 @@ export class FileLoggerWriter {
    */
   readRecentLogs(limit = 100): string[] {
     try {
-      if (!fs.existsSync(this.currentLogPath)) {
-        return [];
-      }
       const content = fs.readFileSync(this.currentLogPath, 'utf-8');
       const lines = content.trim().split('\n').filter((l) => l.length > 0);
       return lines.slice(-limit);

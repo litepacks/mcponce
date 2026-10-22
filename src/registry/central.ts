@@ -126,11 +126,7 @@ export class CentralRegistry {
         let isAlive = false;
         if (server.pid && isPidRunning(server.pid)) {
           if (server.port && server.host) {
-            let health = await checkHealth(server.host, server.port, server.name, 2000);
-            if (!health?.ok) {
-              await new Promise((r) => setTimeout(r, 100));
-              health = await checkHealth(server.host, server.port, server.name, 2000);
-            }
+            const health = await checkHealth(server.host, server.port, server.name, 1500);
             if (health?.ok) {
               isAlive = true;
             }
@@ -164,11 +160,7 @@ export class CentralRegistry {
     if (server.status === 'running' && server.pid) {
       let isAlive = false;
       if (isPidRunning(server.pid) && server.port && server.host) {
-        let health = await checkHealth(server.host, server.port, server.name, 2000);
-        if (!health?.ok) {
-          await new Promise((r) => setTimeout(r, 100));
-          health = await checkHealth(server.host, server.port, server.name, 2000);
-        }
+        const health = await checkHealth(server.host, server.port, server.name, 1500);
         if (health?.ok) isAlive = true;
       }
       if (!isAlive) {

@@ -90,14 +90,20 @@ describe('LockManager', () => {
     lockNested.forceRelease();
     expect(lockNested.hasLockFile()).toBe(false);
 
-    // 3. tryAcquire throwing non-EEXIST error
+    // 3. tryAcquire throwing non-EEXIST error via openSync fallback
     const lockErr = new LockManager(testDir);
+    const linkSpy = vi.spyOn(fs, 'linkSync').mockImplementationOnce(() => {
+      const err: any = new Error('Cross-device link');
+      err.code = 'EXDEV';
+      throw err;
+    });
     const openSpy = vi.spyOn(fs, 'openSync').mockImplementationOnce(() => {
       const err: any = new Error('Permission denied');
       err.code = 'EACCES';
       throw err;
     });
     expect(() => lockErr.tryAcquire('err-app')).toThrow('Permission denied');
+    linkSpy.mockRestore();
     openSpy.mockRestore();
 
     // 4. hasLockFile error catch

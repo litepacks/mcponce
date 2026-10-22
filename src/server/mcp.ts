@@ -8,12 +8,21 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
 import { resolveCompletion } from '../utils/completion.js';
-import type { ToolRegistry } from '../registry/tools.js';
+import type { ToolRegistry, RegisteredTool } from '../registry/tools.js';
+import { normalizeInputSchema } from '../registry/tools.js';
 import type { ResourceRegistry } from '../registry/resources.js';
 import type { SubscriptionRegistry } from '../registry/subscriptions.js';
 import type { PromptRegistry } from '../registry/prompts.js';
 import type { ContextManager } from './context.js';
-import type { Logger, ToolCallResult, ToolExtra, AuthIdentity } from '../types.js';
+import type {
+  Logger,
+  ToolCallResult,
+  ToolExtra,
+  AuthIdentity,
+  ResourceDefinition,
+  ResourceTemplateDefinition,
+  PromptDefinition
+} from '../types.js';
 import { createProgressReporter } from '../utils/progress.js';
 import { composeMiddleware, type MiddlewareManager } from '../utils/middleware.js';
 import { verifyToolScopes } from '../utils/security.js';
@@ -62,9 +71,10 @@ export function normalizeToolResult<TData = any>(rawResult: any): ToolCallResult
     };
   }
 
-  // Direct Buffer or Uint8Array returned by tool
-  if (Buffer.isBuffer(rawResult) || rawResult instanceof Uint8Array) {
-    const img = normalizeContentItem(rawResult);
+  // Direct Buffer, Uint8Array, or ArrayBuffer returned by tool
+  if (Buffer.isBuffer(rawResult) || rawResult instanceof Uint8Array || rawResult instanceof ArrayBuffer) {
+    const raw = rawResult instanceof ArrayBuffer ? new Uint8Array(rawResult) : rawResult;
+    const img = normalizeContentItem(raw);
     const mime = (img as any).mimeType || 'application/octet-stream';
     return {
       content: [img],
@@ -159,7 +169,20 @@ import { executeWithRetry, raceWithSignal } from '../utils/retry.js';
 import type { AnalyticsCollector } from './analytics.js';
 import type { ServerMetrics } from './hono.js';
 
-export function createSessionMcpServer<TContext = unknown>(options: {
+export function normalizeOutputSchema(schema?: Record<string, any> | z.ZodTypeAny): any {
+  if (!schema) {
+    return undefined;
+  }
+  if (typeof schema === 'object' && '_def' in schema) {
+    return schema;
+  }
+  if (typeof schema === 'object') {
+    return normalizeInputSchema(schema as any);
+  }
+  return schema;
+}
+
+export interface SessionMcpServerOptions<TContext = unknown> {
   name: string;
   version: string;
   toolRegistry: ToolRegistry<TContext>;
@@ -170,7 +193,11 @@ export function createSessionMcpServer<TContext = unknown>(options: {
   queueManager?: QueueManager;
   cacheManager?: ToolCacheManager;
   middlewareManager?: MiddlewareManager<TContext>;
-  resolveQueueConfig?: (tool: ToolDefinition<any, TContext>, options?: any) => { key: string; maxConcurrency: number } | null;
+  resolveQueueConfig?: (
+    tool: ToolDefinition<any, TContext>,
+    options?: any,
+    isChildCall?: boolean
+  ) => { key: string; maxConcurrency: number } | null;
   callTool?: <TResult = any>(
     name: string,
     args?: Record<string, any>,
@@ -189,16 +216,441 @@ export function createSessionMcpServer<TContext = unknown>(options: {
   auth?: AuthIdentity;
   analytics?: AnalyticsCollector;
   metrics?: ServerMetrics;
-}): McpServer {
+}
+
+export function createToolCallback<TContext = unknown>(
+  server: McpServer,
+  tool: RegisteredTool<TContext>,
+  options: SessionMcpServerOptions<TContext>,
+  ctx: TContext
+) {
+  return async (args: any, extraFromMcp?: any) => {
+    const start = Date.now();
+    options.logger?.info('tool:start', { name: tool.name });
+    options.onToolCalled?.(tool.name);
+
+    if (tool.requireAuth && !options.auth) {
+      throw new Error(`Authentication required for tool "${tool.name}"`);
+    }
+
+    if (tool.scopes && tool.scopes.length > 0) {
+      if (!verifyToolScopes(tool.scopes, options.auth?.scopes)) {
+        throw new Error(
+          `Forbidden: Tool "${tool.name}" requires scopes: ${tool.scopes.join(', ')}`
+        );
+      }
+    }
+
+    const cacheConfig = typeof tool.cache === 'object' ? tool.cache : (tool.cache ? {} : undefined);
+    if (cacheConfig && options.cacheManager) {
+      const cached = options.cacheManager.get(tool.name, args, cacheConfig);
+      if (cached) {
+        const durationMs = Date.now() - start;
+        options.analytics?.recordInvocation({
+          tool: tool.name,
+          durationMs,
+          status: 'success',
+          isCacheHit: true
+        });
+        if (options.metrics) {
+          options.metrics.lastToolInvocation = {
+            name: tool.name,
+            timestamp: new Date().toISOString()
+          };
+        }
+        options.logger?.info('tool:cache_hit', { name: tool.name, durationMs });
+        return normalizeToolResult(cached);
+      }
+    }
+
+    const effectiveTimeout =
+      tool.timeoutMs !== undefined
+        ? tool.timeoutMs
+        : (options.defaultTimeoutMs !== undefined ? options.defaultTimeoutMs : 60000);
+
+    const timeoutController = effectiveTimeout > 0 ? new AbortController() : null;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    if (effectiveTimeout > 0 && timeoutController) {
+      timeoutTimer = setTimeout(() => {
+        timeoutController.abort(
+          new Error(`Tool "${tool.name}" execution timed out after ${effectiveTimeout}ms`)
+        );
+      }, effectiveTimeout);
+    }
+
+    const signals: AbortSignal[] = [];
+    if (extraFromMcp?.signal) {
+      signals.push(extraFromMcp.signal);
+    }
+    if (timeoutController) {
+      signals.push(timeoutController.signal);
+    }
+
+    const mergedSignal =
+      signals.length > 1
+        ? (typeof AbortSignal.any === 'function' ? AbortSignal.any(signals) : signals[0])
+        : signals[0];
+
+    const queueConfig = options.resolveQueueConfig?.(tool);
+    let release: (() => void) | undefined;
+    let retriesCount = 0;
+
+    try {
+      if (queueConfig && options.queueManager) {
+        release = await options.queueManager.getQueue(queueConfig.key, queueConfig.maxConcurrency).acquire(mergedSignal);
+      }
+
+      const callToolHelper = options.callTool
+        ? <T = any>(
+            targetName: string,
+            targetArgs: Record<string, any> = {},
+            targetOptions?: any
+          ) => {
+            const mergedTargetOptions = {
+              ...targetOptions,
+              auth: targetOptions?.auth || options.auth
+            };
+            return options.callTool!<T>(targetName, targetArgs, mergedTargetOptions, [tool.name]);
+          }
+        : undefined;
+
+      const clearCacheHelper = (targetToolName?: string) => {
+        return options.cacheManager ? options.cacheManager.clear(targetToolName) : 0;
+      };
+
+      const progressToken = extraFromMcp?._meta?.progressToken;
+      const reportProgress = createProgressReporter({
+        toolName: tool.name,
+        progressToken,
+        sendMcpNotification: extraFromMcp?.sendNotification
+          ? (notif) => extraFromMcp.sendNotification(notif)
+          : undefined,
+        logger: options.logger
+      });
+
+      const sampleHelper = (input: string | SampleOptions, opts?: Partial<SampleOptions>) => {
+        return executeSample(input, opts, server, options.onSample, mergedSignal);
+      };
+
+      const listRootsHelper = () => {
+        return executeListRoots(server, options.onListRoots, mergedSignal);
+      };
+
+      const handlerCtx =
+        ctx && typeof ctx === 'object'
+          ? (callToolHelper
+              ? Object.assign(Object.create(Object.getPrototypeOf(ctx)), ctx, {
+                  callTool: callToolHelper,
+                  signal: mergedSignal,
+                  clearCache: clearCacheHelper,
+                  reportProgress,
+                  sample: sampleHelper,
+                  listRoots: listRootsHelper,
+                  auth: options.auth
+                })
+              : Object.assign(Object.create(Object.getPrototypeOf(ctx)), ctx, {
+                  signal: mergedSignal,
+                  clearCache: clearCacheHelper,
+                  reportProgress,
+                  sample: sampleHelper,
+                  listRoots: listRootsHelper,
+                  auth: options.auth
+                }))
+          : {
+              callTool: callToolHelper,
+              signal: mergedSignal,
+              clearCache: clearCacheHelper,
+              reportProgress,
+              sample: sampleHelper,
+              listRoots: listRootsHelper,
+              auth: options.auth
+            };
+
+      const extra: ToolExtra = {
+        signal: mergedSignal,
+        callTool: (callToolHelper || (() => Promise.reject(new Error('callTool is not available in this context')))) as any,
+        clearCache: clearCacheHelper,
+        reportProgress,
+        progressToken,
+        sample: sampleHelper,
+        listRoots: listRootsHelper,
+        auth: options.auth
+      };
+
+      const middlewarePipeline = options.middlewareManager
+        ? options.middlewareManager.composeForTool(
+            tool.name,
+            (pCtx) => Promise.resolve(tool.handler(pCtx.args, pCtx.context, pCtx.extra)),
+            tool.middleware
+          )
+        : tool.middleware && tool.middleware.length > 0
+          ? composeMiddleware(
+              tool.middleware,
+              (pCtx) => Promise.resolve(tool.handler(pCtx.args, pCtx.context, pCtx.extra))
+            )
+          : null;
+
+      const runAttempt = () => {
+        if (middlewarePipeline) {
+          const middlewareCtx = {
+            tool: tool.name,
+            args: args || {},
+            context: handlerCtx,
+            extra,
+            callStack: []
+          };
+          const executionPromise = middlewarePipeline(middlewareCtx);
+          return raceWithSignal(
+            executionPromise,
+            mergedSignal,
+            () => new Error(`Tool "${tool.name}" execution was cancelled`)
+          );
+        }
+
+        const executionPromise = Promise.resolve(tool.handler(args, handlerCtx, extra));
+        return raceWithSignal(
+          executionPromise,
+          mergedSignal,
+          () => new Error(`Tool "${tool.name}" execution was cancelled`)
+        );
+      };
+
+      const { result: rawResult, retries } = await executeWithRetry(
+        runAttempt,
+        {
+          name: tool.name,
+          config: tool.retry,
+          signal: mergedSignal,
+          onRetry: (err, attempt, delayMs) => {
+            options.logger?.warn('tool:retry', {
+              name: tool.name,
+              attempt,
+              delayMs,
+              error: err?.message || String(err)
+            });
+          }
+        }
+      );
+      retriesCount = retries;
+
+      const durationMs = Date.now() - start;
+      options.analytics?.recordInvocation({
+        tool: tool.name,
+        durationMs,
+        status: 'success',
+        retries: retriesCount
+      });
+      if (options.metrics) {
+        options.metrics.lastToolInvocation = {
+          name: tool.name,
+          timestamp: new Date().toISOString()
+        };
+      }
+
+      options.logger?.info('tool:end', { name: tool.name, durationMs });
+      const normalized = normalizeToolResult(rawResult);
+      if (tool.outputSchema && !(normalized as any).structuredContent) {
+        if (rawResult && typeof rawResult === 'object') {
+          if ('structuredContent' in rawResult) {
+            (normalized as any).structuredContent = rawResult.structuredContent;
+          } else if ('data' in rawResult && typeof rawResult.data === 'object' && rawResult.data !== null) {
+            (normalized as any).structuredContent = rawResult.data;
+          } else if (!('content' in rawResult)) {
+            (normalized as any).structuredContent = rawResult;
+          } else if (rawResult.data !== undefined) {
+            (normalized as any).structuredContent = rawResult.data;
+          }
+        }
+      }
+      if (cacheConfig && options.cacheManager && !normalized.isError) {
+        options.cacheManager.set(tool.name, args, normalized, cacheConfig);
+      }
+      return normalized;
+    } catch (error: any) {
+      const durationMs = Date.now() - start;
+      const isTimeout = String(error?.message || error).includes('timed out');
+      const isCancelled = Boolean(mergedSignal?.aborted && !isTimeout);
+      const status = isTimeout ? 'timeout' : (isCancelled ? 'cancelled' : 'error');
+
+      options.analytics?.recordInvocation({
+        tool: tool.name,
+        durationMs,
+        status,
+        errorMessage: error.message || String(error),
+        retries: retriesCount || (error?.retries ?? 0)
+      });
+      if (options.metrics) {
+        options.metrics.lastToolInvocation = {
+          name: tool.name,
+          timestamp: new Date().toISOString()
+        };
+      }
+
+      options.logger?.error('tool:error', {
+        name: tool.name,
+        durationMs,
+        isTimeout,
+        isCancelled,
+        error: error.message || String(error),
+        stack: error.stack
+      });
+
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: `Error in tool "${tool.name}": ${error.message || String(error)}`
+          }
+        ]
+      };
+    } finally {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+      }
+      release?.();
+    }
+  };
+}
+
+export function registerSingleTool<TContext = unknown>(
+  server: McpServer,
+  tool: RegisteredTool<TContext>,
+  options: SessionMcpServerOptions<TContext>,
+  ctx: TContext
+): void {
+  if ((server as any)._registeredTools?.[tool.name]) {
+    return;
+  }
+
+  const callback = createToolCallback(server, tool, options, ctx);
+  server.registerTool(
+    tool.name,
+    {
+      title: tool.title,
+      description: tool.description,
+      inputSchema: tool.normalizedSchema,
+      outputSchema: normalizeOutputSchema(tool.outputSchema) as any,
+      annotations: tool.annotations
+    },
+    callback as any
+  );
+}
+
+export function registerSingleResource<TContext = unknown>(
+  server: McpServer,
+  res: ResourceDefinition<TContext>,
+  ctx: TContext
+): void {
+  if ((server as any)._registeredResources?.[res.uri]) {
+    return;
+  }
+  server.registerResource(
+    res.name || res.uri,
+    res.uri,
+    {
+      description: res.description,
+      mimeType: res.mimeType
+    },
+    async (uri: URL) => {
+      const raw = await res.handler(uri, ctx);
+      return normalizeResourceResult(raw, uri, res.mimeType);
+    }
+  );
+}
+
+export function registerSingleTemplate<TContext = unknown>(
+  server: McpServer,
+  tpl: ResourceTemplateDefinition<TContext>,
+  ctx: TContext
+): void {
+  const resourceTemplate = new ResourceTemplate(tpl.uriTemplate, {
+    list: tpl.list
+      ? async () => {
+          const result = await tpl.list!(ctx);
+          if (Array.isArray(result)) {
+            return { resources: result };
+          }
+          return result;
+        }
+      : undefined,
+    complete: tpl.complete
+  });
+
+  server.registerResource(
+    tpl.name || tpl.uriTemplate,
+    resourceTemplate,
+    {
+      description: tpl.description,
+      mimeType: tpl.mimeType
+    },
+    async (uri: URL, variables: any) => {
+      const params: Record<string, string> = {};
+      for (const [k, v] of Object.entries(variables || {})) {
+        params[k] = Array.isArray(v) ? v.join(',') : String(v);
+      }
+      const raw = await tpl.handler(uri, params, ctx);
+      return normalizeResourceResult(raw, uri, tpl.mimeType);
+    }
+  );
+}
+
+export function registerSinglePrompt<TContext = unknown>(
+  server: McpServer,
+  prompt: PromptDefinition<any, TContext>,
+  ctx: TContext
+): void {
+  if ((server as any)._registeredPrompts?.[prompt.name]) {
+    return;
+  }
+
+  let argsSchema = prompt.argsSchema;
+  if (argsSchema && prompt.complete) {
+    const wrappedSchema: Record<string, any> = {};
+    for (const [key, field] of Object.entries(argsSchema)) {
+      const zodField = typeof field === 'string' ? z.string() : field;
+      if (prompt.complete[key]) {
+        wrappedSchema[key] = completable(zodField as any, async (val: string, context?: any) => {
+          const list = await prompt.complete![key](val, context);
+          return Array.isArray(list) ? list : [];
+        });
+      } else {
+        wrappedSchema[key] = zodField;
+      }
+    }
+    argsSchema = wrappedSchema;
+  }
+
+  server.registerPrompt(
+    prompt.name,
+    {
+      description: prompt.description,
+      argsSchema: argsSchema as any
+    },
+    async (args: any) => {
+      return await prompt.handler(args, ctx);
+    }
+  );
+}
+
+export function createSessionMcpServer<TContext = unknown>(
+  options: SessionMcpServerOptions<TContext>
+): McpServer {
   const server = new McpServer({
     name: options.name,
     version: options.version
   });
 
-  // Register capabilities for resource subscriptions and list updates
+  // Register capabilities for tools, resources subscriptions/list updates, and prompts list updates
   server.server.registerCapabilities({
+    tools: {
+      listChanged: true
+    },
     resources: {
       subscribe: true,
+      listChanged: true
+    },
+    prompts: {
       listChanged: true
     }
   });
@@ -238,373 +690,22 @@ export function createSessionMcpServer<TContext = unknown>(options: {
 
   // Register all tools
   for (const tool of options.toolRegistry.getAll()) {
-    server.registerTool(
-      tool.name,
-      {
-        description: tool.description,
-        inputSchema: tool.normalizedSchema
-      },
-      async (args: any, extraFromMcp?: any) => {
-        const start = Date.now();
-        options.logger?.info('tool:start', { name: tool.name });
-        options.onToolCalled?.(tool.name);
-
-        if (tool.requireAuth && !options.auth) {
-          throw new Error(`Authentication required for tool "${tool.name}"`);
-        }
-
-        if (tool.scopes && tool.scopes.length > 0) {
-          if (!verifyToolScopes(tool.scopes, options.auth?.scopes)) {
-            throw new Error(
-              `Forbidden: Tool "${tool.name}" requires scopes: ${tool.scopes.join(', ')}`
-            );
-          }
-        }
-
-        const cacheConfig = typeof tool.cache === 'object' ? tool.cache : (tool.cache ? {} : undefined);
-        if (cacheConfig && options.cacheManager) {
-          const cached = options.cacheManager.get(tool.name, args, cacheConfig);
-          if (cached) {
-            const durationMs = Date.now() - start;
-            options.analytics?.recordInvocation({
-              tool: tool.name,
-              durationMs,
-              status: 'success',
-              isCacheHit: true
-            });
-            if (options.metrics) {
-              options.metrics.lastToolInvocation = {
-                name: tool.name,
-                timestamp: new Date().toISOString()
-              };
-            }
-            options.logger?.info('tool:cache_hit', { name: tool.name, durationMs });
-            return normalizeToolResult(cached);
-          }
-        }
-
-        const effectiveTimeout =
-          tool.timeoutMs !== undefined
-            ? tool.timeoutMs
-            : (options.defaultTimeoutMs !== undefined ? options.defaultTimeoutMs : 60000);
-
-        const timeoutController = effectiveTimeout > 0 ? new AbortController() : null;
-        let timeoutTimer: NodeJS.Timeout | undefined;
-        if (effectiveTimeout > 0 && timeoutController) {
-          timeoutTimer = setTimeout(() => {
-            timeoutController.abort(
-              new Error(`Tool "${tool.name}" execution timed out after ${effectiveTimeout}ms`)
-            );
-          }, effectiveTimeout);
-        }
-
-        const signals: AbortSignal[] = [];
-        if (extraFromMcp?.signal) {
-          signals.push(extraFromMcp.signal);
-        }
-        if (timeoutController) {
-          signals.push(timeoutController.signal);
-        }
-
-        const mergedSignal =
-          signals.length > 1
-            ? (typeof AbortSignal.any === 'function' ? AbortSignal.any(signals) : signals[0])
-            : signals[0];
-
-        const queueConfig = options.resolveQueueConfig?.(tool);
-        let release: (() => void) | undefined;
-        let retriesCount = 0;
-
-        try {
-          if (queueConfig && options.queueManager) {
-            release = await options.queueManager.getQueue(queueConfig.key, queueConfig.maxConcurrency).acquire(mergedSignal);
-          }
-
-          const callToolHelper = options.callTool
-            ? <T = any>(
-                targetName: string,
-                targetArgs: Record<string, any> = {},
-                targetOptions?: any
-              ) => {
-                const mergedTargetOptions = {
-                  ...targetOptions,
-                  auth: targetOptions?.auth || options.auth
-                };
-                return options.callTool!<T>(targetName, targetArgs, mergedTargetOptions, [tool.name]);
-              }
-            : undefined;
-
-          const clearCacheHelper = (targetToolName?: string) => {
-            return options.cacheManager ? options.cacheManager.clear(targetToolName) : 0;
-          };
-
-          const progressToken = extraFromMcp?._meta?.progressToken;
-          const reportProgress = createProgressReporter({
-            toolName: tool.name,
-            progressToken,
-            sendMcpNotification: extraFromMcp?.sendNotification
-              ? (notif) => extraFromMcp.sendNotification(notif)
-              : undefined,
-            logger: options.logger
-          });
-
-          const sampleHelper = (input: string | SampleOptions, opts?: Partial<SampleOptions>) => {
-            return executeSample(input, opts, server, options.onSample, mergedSignal);
-          };
-
-          const listRootsHelper = () => {
-            return executeListRoots(server, options.onListRoots, mergedSignal);
-          };
-
-          const handlerCtx =
-            ctx && typeof ctx === 'object'
-              ? (callToolHelper
-                  ? Object.assign(Object.create(Object.getPrototypeOf(ctx)), ctx, {
-                      callTool: callToolHelper,
-                      signal: mergedSignal,
-                      clearCache: clearCacheHelper,
-                      reportProgress,
-                      sample: sampleHelper,
-                      listRoots: listRootsHelper,
-                      auth: options.auth
-                    })
-                  : Object.assign(Object.create(Object.getPrototypeOf(ctx)), ctx, {
-                      signal: mergedSignal,
-                      clearCache: clearCacheHelper,
-                      reportProgress,
-                      sample: sampleHelper,
-                      listRoots: listRootsHelper,
-                      auth: options.auth
-                    }))
-              : {
-                  callTool: callToolHelper,
-                  signal: mergedSignal,
-                  clearCache: clearCacheHelper,
-                  reportProgress,
-                  sample: sampleHelper,
-                  listRoots: listRootsHelper,
-                  auth: options.auth
-                };
-
-          const extra: ToolExtra = {
-            signal: mergedSignal,
-            callTool: (callToolHelper || (() => Promise.reject(new Error('callTool is not available in this context')))) as any,
-            clearCache: clearCacheHelper,
-            reportProgress,
-            progressToken,
-            sample: sampleHelper,
-            listRoots: listRootsHelper,
-            auth: options.auth
-          };
-
-          const middlewarePipeline = options.middlewareManager
-            ? options.middlewareManager.composeForTool(
-                tool.name,
-                (pCtx) => Promise.resolve(tool.handler(pCtx.args, pCtx.context, pCtx.extra)),
-                tool.middleware
-              )
-            : tool.middleware && tool.middleware.length > 0
-              ? composeMiddleware(
-                  tool.middleware,
-                  (pCtx) => Promise.resolve(tool.handler(pCtx.args, pCtx.context, pCtx.extra))
-                )
-              : null;
-
-          const runAttempt = () => {
-            if (middlewarePipeline) {
-              const middlewareCtx = {
-                tool: tool.name,
-                args: args || {},
-                context: handlerCtx,
-                extra,
-                callStack: []
-              };
-              const executionPromise = middlewarePipeline(middlewareCtx);
-              return raceWithSignal(
-                executionPromise,
-                mergedSignal,
-                () => new Error(`Tool "${tool.name}" execution was cancelled`)
-              );
-            }
-
-            const executionPromise = Promise.resolve(tool.handler(args, handlerCtx, extra));
-            return raceWithSignal(
-              executionPromise,
-              mergedSignal,
-              () => new Error(`Tool "${tool.name}" execution was cancelled`)
-            );
-          };
-
-          const { result: rawResult, retries } = await executeWithRetry(
-            runAttempt,
-            {
-              name: tool.name,
-              config: tool.retry,
-              signal: mergedSignal,
-              onRetry: (err, attempt, delayMs) => {
-                options.logger?.warn('tool:retry', {
-                  name: tool.name,
-                  attempt,
-                  delayMs,
-                  error: err?.message || String(err)
-                });
-              }
-            }
-          );
-          retriesCount = retries;
-
-          const durationMs = Date.now() - start;
-          const normalized = normalizeToolResult(rawResult);
-
-          const status = normalized.isError ? 'error' : 'success';
-          const errorMsg = normalized.isError ? (normalized.content?.[0] as any)?.text : undefined;
-
-          options.analytics?.recordInvocation({
-            tool: tool.name,
-            durationMs,
-            status,
-            errorMessage: errorMsg,
-            retries: retriesCount
-          });
-          if (options.metrics) {
-            options.metrics.lastToolInvocation = {
-              name: tool.name,
-              timestamp: new Date().toISOString()
-            };
-          }
-
-          options.logger?.info('tool:end', { name: tool.name, durationMs });
-
-          if (cacheConfig && options.cacheManager && !normalized.isError) {
-            options.cacheManager.set(tool.name, args, normalized, cacheConfig);
-          }
-          return normalized;
-        } catch (error: any) {
-          const durationMs = Date.now() - start;
-          const isTimeout = String(error?.message || error).includes('timed out');
-          const isCancelled = Boolean(mergedSignal?.aborted && !isTimeout);
-          const status = isTimeout ? 'timeout' : (isCancelled ? 'cancelled' : 'error');
-
-          options.analytics?.recordInvocation({
-            tool: tool.name,
-            durationMs,
-            status,
-            errorMessage: error.message || String(error),
-            retries: retriesCount || (error?.retries ?? 0)
-          });
-          if (options.metrics) {
-            options.metrics.lastToolInvocation = {
-              name: tool.name,
-              timestamp: new Date().toISOString()
-            };
-          }
-
-          options.logger?.error('tool:error', {
-            name: tool.name,
-            durationMs,
-            isTimeout,
-            isCancelled,
-            error: error.message || String(error),
-            stack: error.stack
-          });
-
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text',
-                text: `Error in tool "${tool.name}": ${error.message || String(error)}`
-              }
-            ]
-          };
-        } finally {
-          if (timeoutTimer) {
-            clearTimeout(timeoutTimer);
-          }
-          release?.();
-        }
-      }
-    );
+    registerSingleTool(server, tool, options, ctx);
   }
 
   // Register all static resources
   for (const res of options.resourceRegistry.getAll()) {
-    server.registerResource(
-      res.name || res.uri,
-      res.uri,
-      {
-        description: res.description,
-        mimeType: res.mimeType
-      },
-      async (uri: URL) => {
-        const raw = await res.handler(uri, ctx);
-        return normalizeResourceResult(raw, uri, res.mimeType);
-      }
-    );
+    registerSingleResource(server, res, ctx);
   }
 
   // Register all dynamic resource templates
   for (const tpl of options.resourceRegistry.getAllTemplates()) {
-    const resourceTemplate = new ResourceTemplate(tpl.uriTemplate, {
-      list: tpl.list
-        ? async () => {
-            const result = await tpl.list!(ctx);
-            if (Array.isArray(result)) {
-              return { resources: result };
-            }
-            return result;
-          }
-        : undefined,
-      complete: tpl.complete
-    });
-
-    server.registerResource(
-      tpl.name || tpl.uriTemplate,
-      resourceTemplate,
-      {
-        description: tpl.description,
-        mimeType: tpl.mimeType
-      },
-      async (uri: URL, variables: any) => {
-        const params: Record<string, string> = {};
-        for (const [k, v] of Object.entries(variables || {})) {
-          params[k] = Array.isArray(v) ? v.join(',') : String(v);
-        }
-        const raw = await tpl.handler(uri, params, ctx);
-        return normalizeResourceResult(raw, uri, tpl.mimeType);
-      }
-    );
+    registerSingleTemplate(server, tpl, ctx);
   }
 
   // Register all prompts
   for (const prompt of options.promptRegistry.getAll()) {
-    let argsSchema = prompt.argsSchema;
-    if (argsSchema && prompt.complete) {
-      const wrappedSchema: Record<string, any> = {};
-      for (const [key, field] of Object.entries(argsSchema)) {
-        const zodField = typeof field === 'string' ? z.string() : field;
-        if (prompt.complete[key]) {
-          wrappedSchema[key] = completable(zodField as any, async (val: string, context?: any) => {
-            const list = await prompt.complete![key](val, context);
-            return Array.isArray(list) ? list : [];
-          });
-        } else {
-          wrappedSchema[key] = zodField;
-        }
-      }
-      argsSchema = wrappedSchema;
-    }
-
-    server.registerPrompt(
-      prompt.name,
-      {
-        description: prompt.description,
-        argsSchema: argsSchema as any
-      },
-      async (args: any) => {
-        return await prompt.handler(args, ctx);
-      }
-    );
+    registerSinglePrompt(server, prompt, ctx);
   }
 
   // Register completion capability and fallback request handler if not yet registered
@@ -632,6 +733,9 @@ export function createSessionMcpServer<TContext = unknown>(options: {
   } catch {
     // Handler already configured by McpServer
   }
+
+  (server as any)._sessionOptions = options;
+  (server as any)._sessionCtx = ctx;
 
   return server;
 }

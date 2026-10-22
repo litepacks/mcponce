@@ -154,7 +154,7 @@ export class InstanceCoordinator {
     const lockData = this.lockManager.readLock();
     const currentState = this.stateManager.read();
     const isHealthy = currentState
-      ? await checkHealth(currentState.host, currentState.port, this.config.name, 500)
+      ? await checkHealth(currentState.host, currentState.port, this.config.name, 300)
       : null;
 
     if (!isHealthy) {

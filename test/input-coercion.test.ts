@@ -23,30 +23,6 @@ describe('Smart Input Coercion & Schema Defaults', () => {
   let app: McpApp;
   let testDataDir: string;
 
-  beforeEach(async () => {
-    testDataDir = path.join(
-      os.tmpdir(),
-      `mcponce-test-coercion-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    );
-    await fs.mkdir(testDataDir, { recursive: true });
-
-    app = createMcpServer({
-      name: 'test-coercion-server',
-      version: '1.0.0',
-      dataDir: testDataDir,
-      logging: false
-    });
-  });
-
-  afterEach(async () => {
-    try {
-      await app.stop();
-    } catch {}
-    try {
-      await fs.rm(testDataDir, { recursive: true, force: true });
-    } catch {}
-  });
-
   describe('Unit: Coercion utilities', () => {
     it('coerces numbers properly and handles invalid inputs', () => {
       expect(coerceNumber('42')).toBe(42);
@@ -90,9 +66,11 @@ describe('Smart Input Coercion & Schema Defaults', () => {
       expect(coerceObject('invalid json')).toBe('invalid json');
     });
 
-    it('coerces arrays from JSON arrays and scalar values', () => {
+    it('coerces arrays from JSON arrays, comma-separated lists, and scalar values', () => {
       expect(coerceArray('["a", "b", "c"]')).toEqual(['a', 'b', 'c']);
       expect(coerceArray(['x', 'y'])).toEqual(['x', 'y']);
+      expect(coerceArray('apple, banana, cherry')).toEqual(['apple', 'banana', 'cherry']);
+      expect(coerceArray('10,20,30')).toEqual(['10', '20', '30']);
       expect(coerceArray('single_tag')).toEqual(['single_tag']);
       expect(coerceArray(123)).toEqual([123]);
       expect(coerceArray(null)).toBeNull();
@@ -107,8 +85,24 @@ describe('Smart Input Coercion & Schema Defaults', () => {
     });
   });
 
-  describe('Integration: Extended Property Config & Defaults', () => {
-    it('applies schema defaults when fields are omitted or undefined', async () => {
+  describe('Integration and Reflection tests', () => {
+    beforeEach(() => {
+      app = createMcpServer({
+        name: 'test-coercion-server',
+        version: '1.0.0',
+        logging: false,
+        registerInCentral: false
+      });
+    });
+
+    afterEach(async () => {
+      try {
+        await app.stop();
+      } catch {}
+    });
+
+    describe('Integration: Extended Property Config & Defaults', () => {
+      it('applies schema defaults when fields are omitted or undefined', async () => {
       app.tool({
         name: 'pagination_tool',
         inputSchema: {
@@ -435,5 +429,100 @@ describe('Smart Input Coercion & Schema Defaults', () => {
       expect(resultZod.zObj).toEqual({ x: 42 });
       expect(resultZod.zRec).toEqual({ y: 24 });
     });
+
+    it('supports question-mark optional shorthand and typed array schemas', async () => {
+      app.tool({
+        name: 'typed_shorthand_tool',
+        inputSchema: {
+          name: 'string',
+          title: 'string?',
+          tags: 'string[]',
+          scores: 'number[]?',
+          flags: 'boolean[]?'
+        },
+        coerceInputs: true,
+        handler: ({ name, title, tags, scores, flags }) => {
+          return { name, title, tags, scores, flags };
+        }
+      });
+
+      // 1. Calling with optional fields omitted
+      const res1 = await app.callTool('typed_shorthand_tool', {
+        name: 'Alice',
+        tags: 'single_tag'
+      });
+      expect(res1.data).toEqual({
+        name: 'Alice',
+        title: undefined,
+        tags: ['single_tag'],
+        scores: undefined,
+        flags: undefined
+      });
+
+      // 2. Calling with optional fields provided and coerced
+      const res2 = await app.callTool('typed_shorthand_tool', {
+        name: 'Bob',
+        title: 'Dr.',
+        tags: ['tag1', 'tag2'],
+        scores: '["10", 20, "30"]',
+        flags: '["true", "false", 1]'
+      });
+      expect(res2.data).toEqual({
+        name: 'Bob',
+        title: 'Dr.',
+        tags: ['tag1', 'tag2'],
+        scores: [10, 20, 30],
+        flags: [true, false, true]
+      });
+      // 3. Calling with comma-separated string inputs (e.g. from CLI)
+      const res3 = await app.callTool('typed_shorthand_tool', {
+        name: 'Charlie',
+        tags: 'frontend, backend, devops',
+        scores: '100, 200, 300',
+        flags: 'true, false, true'
+      });
+      expect(res3.data).toEqual({
+        name: 'Charlie',
+        title: undefined,
+        tags: ['frontend', 'backend', 'devops'],
+        scores: [100, 200, 300],
+        flags: [true, false, true]
+      });
+    });
+
+    it('coerces comma-separated CLI inputs into ZodArray schemas', async () => {
+      app.tool({
+        name: 'zod_array_tool',
+        inputSchema: z.object({
+          tags: z.array(z.string()),
+          scores: z.array(z.number())
+        }),
+        coerceInputs: true,
+        handler: ({ tags, scores }) => ({ tags, scores })
+      });
+
+      const res = await app.callTool('zod_array_tool', {
+        tags: 'mcp, ai, agents',
+        scores: '10, 20, 30'
+      });
+      expect(res.data).toEqual({
+        tags: ['mcp', 'ai', 'agents'],
+        scores: [10, 20, 30]
+      });
+    });
+
+    it('supports app.tool(name, description, handler) overload without inputSchema', async () => {
+      app.tool('ping', 'Health check ping tool', async () => 'pong');
+
+      const tool = app.getTool('ping');
+      expect(tool).toBeDefined();
+      expect(tool?.name).toBe('ping');
+      expect(tool?.description).toBe('Health check ping tool');
+
+      const res = await app.callTool('ping', {});
+      expect(res.data).toBe('pong');
+    });
   });
 });
+});
+

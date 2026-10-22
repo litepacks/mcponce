@@ -446,5 +446,28 @@ describe('In-Memory Tool Response Caching', () => {
       expect(reset.evictions).toBe(0);
       expect(reset.size).toBe(1); // cached items are preserved
     });
+
+    it('supports AGENTS.md key: (args) => string alias', async () => {
+      const server = createMcpServer('test-key-alias-server');
+      let calls = 0;
+      server.tool({
+        name: 'weather',
+        inputSchema: { city: 'string' },
+        cache: {
+          ttlMs: 60000,
+          key: (args) => args.city.toLowerCase()
+        },
+        handler: ({ city }) => {
+          calls++;
+          return { city: city.toLowerCase(), temp: 22, calls };
+        }
+      });
+
+      const res1 = await server.callTool('weather', { city: 'London' });
+      const res2 = await server.callTool('weather', { city: 'LONDON' }); // Normalized by key generator!
+      expect(res1.data).toEqual({ city: 'london', temp: 22, calls: 1 });
+      expect(res2.data).toEqual({ city: 'london', temp: 22, calls: 1 });
+      expect(calls).toBe(1);
+    });
   });
 });

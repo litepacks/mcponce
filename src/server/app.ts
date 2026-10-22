@@ -43,7 +43,13 @@ import { ResourceRegistry } from '../registry/resources.js';
 import { SubscriptionRegistry } from '../registry/subscriptions.js';
 import { PromptRegistry } from '../registry/prompts.js';
 import { ContextManager } from './context.js';
-import { normalizeToolResult } from './mcp.js';
+import {
+  normalizeToolResult,
+  registerSingleTool,
+  registerSingleResource,
+  registerSingleTemplate,
+  registerSinglePrompt
+} from './mcp.js';
 import { normalizeResourceResult } from '../utils/media.js';
 import { createHonoApp, type ServerMetrics } from './hono.js';
 import {
@@ -90,7 +96,14 @@ export class McpApp<TContext = unknown> {
   private instanceCoordinator: InstanceCoordinator;
   private stateManager: StateManager;
   private lockManager: LockManager;
-  private centralRegistry = new CentralRegistry();
+  private _centralRegistry?: CentralRegistry;
+
+  private get centralRegistry(): CentralRegistry {
+    if (!this._centralRegistry) {
+      this._centralRegistry = new CentralRegistry();
+    }
+    return this._centralRegistry;
+  }
 
   private httpHandle?: HttpServerHandle;
   private stdioProxyHandle?: StdioProxyHandle;
@@ -125,8 +138,8 @@ export class McpApp<TContext = unknown> {
     });
     this.middlewareManager = new MiddlewareManager<TContext>(raw.middleware);
     this.instanceCoordinator = new InstanceCoordinator(this.config);
-    this.stateManager = new StateManager(this.config.dataDir);
-    this.lockManager = new LockManager(this.config.dataDir);
+    this.stateManager = this.instanceCoordinator.stateManager;
+    this.lockManager = this.instanceCoordinator.lockManager;
 
     this.metrics = {
       startedAt: new Date().toISOString(),
@@ -209,6 +222,11 @@ export class McpApp<TContext = unknown> {
   ): this;
   tool<TInput = any>(
     name: string,
+    description: string,
+    handler: ToolDefinition<TInput, TContext>['handler']
+  ): this;
+  tool<TInput = any>(
+    name: string,
     inputSchema: InputSchemaDefinition | ShorthandInputSchema,
     handler: ToolDefinition<TInput, TContext>['handler']
   ): this;
@@ -224,37 +242,61 @@ export class McpApp<TContext = unknown> {
     schemaOrHandler?: InputSchemaDefinition | ShorthandInputSchema | ToolDefinition<any, TContext>['handler'],
     maybeHandler?: ToolDefinition<any, TContext>['handler']
   ): this {
+    let toolDef: ToolDefinition<any, TContext>;
     if (typeof nameOrDef === 'object' && nameOrDef !== null) {
-      this.toolRegistry.register(nameOrDef);
-      return this;
-    }
-
-    const name = nameOrDef;
-    let description: string | undefined;
-    let inputSchema: InputSchemaDefinition | ShorthandInputSchema | undefined;
-    let handler: ToolDefinition<any, TContext>['handler'];
-
-    if (typeof descOrSchemaOrHandler === 'function') {
-      handler = descOrSchemaOrHandler;
-    } else if (typeof descOrSchemaOrHandler === 'string') {
-      description = descOrSchemaOrHandler;
-      if (typeof schemaOrHandler === 'function') {
-        handler = schemaOrHandler;
-      } else {
-        inputSchema = schemaOrHandler as InputSchemaDefinition | ShorthandInputSchema;
-        handler = maybeHandler!;
-      }
+      toolDef = nameOrDef;
     } else {
-      inputSchema = descOrSchemaOrHandler as InputSchemaDefinition | ShorthandInputSchema;
-      handler = schemaOrHandler as ToolDefinition<any, TContext>['handler'];
+      const name = nameOrDef;
+      let description: string | undefined;
+      let inputSchema: InputSchemaDefinition | ShorthandInputSchema | undefined;
+      let handler: ToolDefinition<any, TContext>['handler'];
+
+      if (typeof descOrSchemaOrHandler === 'function') {
+        handler = descOrSchemaOrHandler;
+      } else if (typeof descOrSchemaOrHandler === 'string') {
+        description = descOrSchemaOrHandler;
+        if (typeof schemaOrHandler === 'function') {
+          handler = schemaOrHandler;
+        } else {
+          inputSchema = schemaOrHandler as InputSchemaDefinition | ShorthandInputSchema;
+          handler = maybeHandler!;
+        }
+      } else {
+        inputSchema = descOrSchemaOrHandler as InputSchemaDefinition | ShorthandInputSchema;
+        handler = schemaOrHandler as ToolDefinition<any, TContext>['handler'];
+      }
+
+      toolDef = {
+        name,
+        description,
+        inputSchema: inputSchema as InputSchemaDefinition,
+        handler
+      };
     }
 
-    this.toolRegistry.register({
-      name,
-      description,
-      inputSchema: inputSchema as InputSchemaDefinition,
-      handler
-    });
+    const registered = this.toolRegistry.register(toolDef);
+
+    if (this.sessions.size > 0) {
+      for (const session of this.sessions.values()) {
+        if (session.server && (session.server as any)._sessionOptions) {
+          try {
+            registerSingleTool(
+              session.server,
+              registered,
+              (session.server as any)._sessionOptions,
+              (session.server as any)._sessionCtx
+            );
+          } catch (err: any) {
+            this.logger.debug('Failed to dynamically register tool on session', {
+              tool: registered.name,
+              error: err.message
+            });
+          }
+        }
+      }
+      this.notifyToolListChanged().catch(() => {});
+    }
+
     return this;
   }
 
@@ -746,6 +788,22 @@ export class McpApp<TContext = unknown> {
    */
   resourceTemplate(definition: ResourceTemplateDefinition<TContext>): this {
     this.resourceRegistry.registerTemplate(definition);
+    if (this.sessions.size > 0) {
+      const ctx = this.contextManager.getContext();
+      for (const session of this.sessions.values()) {
+        if (session.server) {
+          try {
+            registerSingleTemplate(session.server, definition, ctx);
+          } catch (err: any) {
+            this.logger.debug('Failed to dynamically register resource template on session', {
+              template: definition.uriTemplate,
+              error: err.message
+            });
+          }
+        }
+      }
+      this.notifyResourceListChanged().catch(() => {});
+    }
     return this;
   }
 
@@ -759,8 +817,7 @@ export class McpApp<TContext = unknown> {
       'uriTemplate' in definition &&
       typeof (definition as ResourceTemplateDefinition<TContext>).uriTemplate === 'string'
     ) {
-      this.resourceRegistry.registerTemplate(definition as ResourceTemplateDefinition<TContext>);
-      return this;
+      return this.resourceTemplate(definition as ResourceTemplateDefinition<TContext>);
     }
 
     const staticDef = definition as ResourceDefinition<TContext>;
@@ -772,11 +829,26 @@ export class McpApp<TContext = unknown> {
         mimeType: staticDef.mimeType,
         handler: (uri, params, ctx) => (staticDef.handler as any)(uri, params, ctx)
       };
-      this.resourceRegistry.registerTemplate(templateDef);
-      return this;
+      return this.resourceTemplate(templateDef);
     }
 
     this.resourceRegistry.register(staticDef);
+    if (this.sessions.size > 0) {
+      const ctx = this.contextManager.getContext();
+      for (const session of this.sessions.values()) {
+        if (session.server) {
+          try {
+            registerSingleResource(session.server, staticDef, ctx);
+          } catch (err: any) {
+            this.logger.debug('Failed to dynamically register resource on session', {
+              uri: staticDef.uri,
+              error: err.message
+            });
+          }
+        }
+      }
+      this.notifyResourceListChanged().catch(() => {});
+    }
     return this;
   }
 
@@ -785,6 +857,22 @@ export class McpApp<TContext = unknown> {
    */
   prompt<TArgs = any>(definition: PromptDefinition<TArgs, TContext>): this {
     this.promptRegistry.register(definition);
+    if (this.sessions.size > 0) {
+      const ctx = this.contextManager.getContext();
+      for (const session of this.sessions.values()) {
+        if (session.server) {
+          try {
+            registerSinglePrompt(session.server, definition, ctx);
+          } catch (err: any) {
+            this.logger.debug('Failed to dynamically register prompt on session', {
+              prompt: definition.name,
+              error: err.message
+            });
+          }
+        }
+      }
+      this.notifyPromptListChanged().catch(() => {});
+    }
     return this;
   }
 
@@ -905,6 +993,56 @@ export class McpApp<TContext = unknown> {
           uri: uriString,
           error: err.message
         });
+      }
+    }
+
+    return notifiedCount;
+  }
+
+  /**
+   * Notifies connected MCP clients that the list of available tools has changed.
+   * Sends `notifications/tools/list_changed`.
+   * Returns the count of client sessions successfully notified.
+   */
+  async notifyToolListChanged(): Promise<number> {
+    let notifiedCount = 0;
+
+    for (const [sessionId, session] of this.sessions.entries()) {
+      if (session.server?.server) {
+        try {
+          await session.server.server.sendToolListChanged();
+          notifiedCount++;
+        } catch (err: any) {
+          this.logger.debug('Failed to send tool list changed notification to session', {
+            session: sessionId,
+            error: err.message
+          });
+        }
+      }
+    }
+
+    return notifiedCount;
+  }
+
+  /**
+   * Notifies connected MCP clients that the list of available prompts has changed.
+   * Sends `notifications/prompts/list_changed`.
+   * Returns the count of client sessions successfully notified.
+   */
+  async notifyPromptListChanged(): Promise<number> {
+    let notifiedCount = 0;
+
+    for (const [sessionId, session] of this.sessions.entries()) {
+      if (session.server?.server) {
+        try {
+          await session.server.server.sendPromptListChanged();
+          notifiedCount++;
+        } catch (err: any) {
+          this.logger.debug('Failed to send prompt list changed notification to session', {
+            session: sessionId,
+            error: err.message
+          });
+        }
       }
     }
 
@@ -1108,7 +1246,7 @@ export class McpApp<TContext = unknown> {
 
       const existingState = this.stateManager.read();
       if (existingState && existingState.name === this.config.name) {
-        const health = await checkHealth(existingState.host, existingState.port, this.config.name, 1000);
+        const health = await checkHealth(existingState.host, existingState.port, this.config.name, 300);
         if (health) {
           return {
             reused: true,
@@ -1378,7 +1516,7 @@ export class McpApp<TContext = unknown> {
       const existingState = this.stateManager.read();
       const isHealthy =
         existingState && existingState.name === this.config.name
-          ? await checkHealth(existingState.host, existingState.port, this.config.name, 1000)
+          ? await checkHealth(existingState.host, existingState.port, this.config.name, 300)
           : null;
 
       if (isHealthy && existingState) {

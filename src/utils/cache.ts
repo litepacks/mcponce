@@ -40,8 +40,9 @@ export class ToolCacheManager {
    * Generates a deterministic cache key for a tool and its arguments.
    */
   generateKey(toolName: string, args: Record<string, any> = {}, config?: ToolCacheConfig): string {
-    if (config?.keyGenerator) {
-      return `tool:${toolName}:${config.keyGenerator(args)}`;
+    const keyGen = config?.key || config?.keyGenerator;
+    if (keyGen) {
+      return `tool:${toolName}:${keyGen(args)}`;
     }
     return `tool:${toolName}:${stableSerialize(args)}`;
   }

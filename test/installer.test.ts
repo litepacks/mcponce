@@ -46,6 +46,20 @@ describe('MCP Client Auto-Installer', () => {
       expect(p).toContain('mcp_config.json');
     });
 
+    it('returns a valid path string for vscode', () => {
+      const pGlobal = getClientConfigPath('vscode');
+      expect(pGlobal).toContain('mcp.json');
+      const pProject = getClientConfigPath('vscode', true);
+      expect(pProject).toContain(path.join('.vscode', 'mcp.json'));
+    });
+
+    it('returns a valid path string for windsurf', () => {
+      const pGlobal = getClientConfigPath('windsurf');
+      expect(pGlobal).toContain('mcp_config.json');
+      const pProject = getClientConfigPath('windsurf', true);
+      expect(pProject).toContain(path.join('.codeium', 'windsurf', 'mcp_config.json'));
+    });
+
     it('throws on unsupported client', () => {
       expect(() => getClientConfigPath('unknown_client')).toThrow(/Unsupported client/);
     });

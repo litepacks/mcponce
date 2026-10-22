@@ -1,6 +1,14 @@
 import os from 'node:os';
 import path from 'node:path';
 
+let cachedHomeDir: string | null = null;
+function getHomeDir(): string {
+  if (!cachedHomeDir) {
+    cachedHomeDir = os.homedir();
+  }
+  return cachedHomeDir;
+}
+
 /**
  * Returns the default application data directory for the given application name,
  * matching platform conventions (macOS, Linux, Windows).
@@ -10,7 +18,7 @@ export function getDefaultDataDir(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  const home = os.homedir();
+  const home = env.HOME || env.USERPROFILE || getHomeDir();
 
   if (platform === 'darwin') {
     return path.join(home, 'Library', 'Application Support', appName);

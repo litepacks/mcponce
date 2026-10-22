@@ -311,27 +311,59 @@ export interface ToolRetryConfig {
   /**
    * Maximum number of retry attempts after the initial failure.
    */
-  attempts: number;
+  attempts?: number;
+  /**
+   * Alias for `attempts` matching AGENTS.md documentation.
+   */
+  maxRetries?: number;
   /**
    * Initial backoff delay in milliseconds before the first retry.
    * Defaults to 100ms.
    */
   backoffMs?: number;
   /**
+   * Alias for `backoffMs` matching AGENTS.md documentation.
+   */
+  initialDelayMs?: number;
+  /**
    * Multiplier for each subsequent backoff delay.
    * Defaults to 2 (exponential).
    */
   factor?: number;
+  /**
+   * Alias for `factor` matching AGENTS.md documentation.
+   */
+  backoffFactor?: number;
   /**
    * Maximum backoff delay cap in milliseconds.
    * Defaults to 5000ms.
    */
   maxBackoffMs?: number;
   /**
+   * Alias for `maxBackoffMs` matching AGENTS.md documentation.
+   */
+  maxDelayMs?: number;
+  /**
+   * Optional randomized jitter to prevent thundering herd problems.
+   * - `true`: applies Equal Jitter (randomizes between 50% and 100% of calculated backoff).
+   * - `number` (e.g. 0.2): applies proportional jitter (±20% around calculated backoff).
+   * - `false` / undefined: deterministic exponential backoff.
+   */
+  jitter?: boolean | number;
+  /**
+   * Whether to inspect error objects for `Retry-After` headers or `retryAfter` / `retryAfterMs` properties.
+   * Defaults to `true`. When false, uses computed backoff delays unconditionally.
+   */
+  respectRetryAfter?: boolean;
+  /**
    * Optional predicate to decide if an error should trigger a retry.
    * If returns false, fails immediately without further retries.
    */
   retryIf?: (error: any) => boolean;
+  /**
+   * Alias for `retryIf` matching AGENTS.md documentation.
+   */
+  retryableErrors?: (error: any) => boolean;
 }
 
 export interface ToolCacheConfig {
@@ -351,6 +383,10 @@ export interface ToolCacheConfig {
    * If omitted, arguments are recursively serialized with sorted keys.
    */
   keyGenerator?: (args: Record<string, any>) => string;
+  /**
+   * Alias for `keyGenerator` matching AGENTS.md documentation.
+   */
+  key?: (args: Record<string, any>) => string;
 }
 
 export interface CacheStats {
@@ -360,7 +396,26 @@ export interface CacheStats {
   evictions: number;
 }
 
-export type InputSchemaPropertyType = 'string' | 'number' | 'boolean' | 'object' | 'array';
+export type InputSchemaPropertyType =
+  | 'string'
+  | 'string?'
+  | 'number'
+  | 'number?'
+  | 'integer'
+  | 'integer?'
+  | 'boolean'
+  | 'boolean?'
+  | 'object'
+  | 'object?'
+  | 'array'
+  | 'array?'
+  | 'string[]'
+  | 'string[]?'
+  | 'number[]'
+  | 'number[]?'
+  | 'boolean[]'
+  | 'boolean[]?'
+  | (string & {});
 
 export interface InputSchemaPropertyConfig {
   type: InputSchemaPropertyType;
@@ -380,6 +435,7 @@ export type InputSchemaDefinition = ShorthandInputSchema | z.ZodRawShape | z.Zod
 export interface ToolCallResult<TData = any> extends CallToolResult {
   data: TData;
   text: string;
+  structuredContent?: Record<string, any>;
 }
 
 export interface ToolExtra {
@@ -432,9 +488,56 @@ export interface CompletionResult {
   hasMore?: boolean;
 }
 
+export interface ToolAnnotations {
+  /**
+   * A human-readable title for the tool.
+   */
+  title?: string;
+  /**
+   * If true, indicates the tool only performs read operations and has no side effects.
+   */
+  readOnlyHint?: boolean;
+  /**
+   * If true, indicates the tool may perform destructive operations (e.g. deletion, overwriting).
+   */
+  destructiveHint?: boolean;
+  /**
+   * If true, indicates calling the tool multiple times with the same arguments produces the same result.
+   */
+  idempotentHint?: boolean;
+  /**
+   * If true, indicates the tool interacts with external open-world systems (e.g. internet, third-party APIs).
+   */
+  openWorldHint?: boolean;
+  /**
+   * Intended audience for the tool results (e.g. user, assistant).
+   */
+  audience?: ('user' | 'assistant')[];
+  /**
+   * Priority score or level for the tool recommendation.
+   */
+  priority?: number;
+  /**
+   * Additional custom hints or metadata.
+   */
+  [key: string]: any;
+}
+
 export interface ToolDefinition<TInput = any, TContext = unknown> {
   name: string;
+  /**
+   * Optional human-readable display title for this tool.
+   */
+  title?: string;
   description?: string;
+  /**
+   * Optional annotations providing hints about tool behavior (read-only, destructive, idempotent, priority, audience).
+   */
+  annotations?: ToolAnnotations;
+  /**
+   * Optional output schema describing the structured return data of the tool.
+   */
+  outputSchema?: Record<string, any> | z.ZodTypeAny;
   inputSchema?: InputSchemaDefinition;
   /**
    * Optional autocompletion functions for tool parameters.

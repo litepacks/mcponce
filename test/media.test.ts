@@ -377,5 +377,16 @@ describe('Media & Image Content Helpers', () => {
       const nullRes = normalizeResourceResult(null, defaultUri);
       expect(nullRes.contents[0].text).toBe('');
     });
+
+    it('normalizes raw ArrayBuffer to ImageContent properly', () => {
+      const arrayBuffer = samplePngBuffer.buffer.slice(
+        samplePngBuffer.byteOffset,
+        samplePngBuffer.byteOffset + samplePngBuffer.byteLength
+      );
+      const res = normalizeContentItem(arrayBuffer);
+      expect(res.type).toBe('image');
+      expect((res as any).mimeType).toBe('image/png');
+      expect((res as any).data).toBe(samplePngBuffer.toString('base64'));
+    });
   });
 });

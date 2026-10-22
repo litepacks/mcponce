@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { createMcpServer } from '../src/index.js';
 import { filterCompletionValues, resolveCompletion } from '../src/utils/completion.js';
 import { openBrowser } from '../src/utils/browser.js';
@@ -166,7 +166,7 @@ describe('Interactive Web Inspector & MCP Autocomplete Protocol (Item #7)', () =
     let host: string;
     let port: number;
 
-    beforeEach(async () => {
+    beforeAll(async () => {
       app = createMcpServer({
         name: 'inspector-test-app',
         port: 0
@@ -219,7 +219,7 @@ describe('Interactive Web Inspector & MCP Autocomplete Protocol (Item #7)', () =
       port = res.port;
     });
 
-    afterEach(async () => {
+    afterAll(async () => {
       await app.stop();
     });
 

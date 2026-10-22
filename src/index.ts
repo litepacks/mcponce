@@ -3,6 +3,7 @@ export { z } from 'zod';
 export type {
   McpServerConfig,
   ToolDefinition,
+  ToolAnnotations,
   ResourceDefinition,
   ResourceTemplateDefinition,
   ResourceTemplateCompleteHandler,
@@ -69,7 +70,15 @@ export type {
   ConfiguredMiddleware,
   PrometheusExportOptions
 } from './types.js';
-export { executeWithRetry, sleepWithSignal, raceWithSignal, type ExecuteWithRetryOptions } from './utils/retry.js';
+export {
+  executeWithRetry,
+  sleepWithSignal,
+  raceWithSignal,
+  extractRetryAfterMs,
+  computeBackoffDelay,
+  parseRetryAfterValue,
+  type ExecuteWithRetryOptions
+} from './utils/retry.js';
 export {
   coerceNumber,
   coerceBoolean,

@@ -47,39 +47,15 @@ export class LockManager {
     };
     const content = JSON.stringify(lockData, null, 2);
 
-    const tmpPath = `${this.lockPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     try {
-      fs.writeFileSync(tmpPath, content);
-      try {
-        fs.linkSync(tmpPath, this.lockPath);
-        return true;
-      } catch (linkErr: any) {
-        if (linkErr.code === 'EEXIST') {
-          return false;
-        }
-        // Fallback to openSync('wx') if linkSync is unsupported on filesystem
-        try {
-          this.fd = fs.openSync(this.lockPath, 'wx');
-          fs.writeSync(this.fd, content);
-          return true;
-        } catch (openErr: any) {
-          if (openErr.code === 'EEXIST') {
-            return false;
-          }
-          throw openErr;
-        }
-      } finally {
-        try {
-          if (fs.existsSync(tmpPath)) {
-            fs.unlinkSync(tmpPath);
-          }
-        } catch {}
-      }
-    } catch (err: any) {
-      if (err.code === 'EEXIST') {
+      this.fd = fs.openSync(this.lockPath, 'wx');
+      fs.writeSync(this.fd, content);
+      return true;
+    } catch (openErr: any) {
+      if (openErr.code === 'EEXIST') {
         return false;
       }
-      throw err;
+      throw openErr;
     }
   }
 
@@ -88,9 +64,6 @@ export class LockManager {
    */
   readLock(): LockData | null {
     try {
-      if (!fs.existsSync(this.lockPath)) {
-        return null;
-      }
       const content = fs.readFileSync(this.lockPath, 'utf-8');
       return JSON.parse(content) as LockData;
     } catch {
@@ -110,12 +83,9 @@ export class LockManager {
     }
 
     try {
-      if (fs.existsSync(this.lockPath)) {
-        // Only unlink if the lock file is ours
-        const lock = this.readLock();
-        if (!lock || lock.pid === process.pid) {
-          fs.unlinkSync(this.lockPath);
-        }
+      const lock = this.readLock();
+      if (!lock || lock.pid === process.pid) {
+        fs.unlinkSync(this.lockPath);
       }
     } catch {}
   }
@@ -132,9 +102,7 @@ export class LockManager {
     }
 
     try {
-      if (fs.existsSync(this.lockPath)) {
-        fs.unlinkSync(this.lockPath);
-      }
+      fs.unlinkSync(this.lockPath);
     } catch {}
   }
 }

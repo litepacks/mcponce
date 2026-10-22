@@ -19,9 +19,6 @@ export class StateManager {
    */
   read(): RuntimeState | null {
     try {
-      if (!fs.existsSync(this.statePath)) {
-        return null;
-      }
       const raw = fs.readFileSync(this.statePath, 'utf-8');
       const data = JSON.parse(raw);
       if (
@@ -56,11 +53,9 @@ export class StateManager {
    */
   clean(): void {
     try {
-      if (fs.existsSync(this.statePath)) {
-        const state = this.read();
-        if (!state || state.pid === process.pid) {
-          fs.unlinkSync(this.statePath);
-        }
+      const state = this.read();
+      if (!state || state.pid === process.pid) {
+        fs.unlinkSync(this.statePath);
       }
     } catch {}
   }
@@ -70,9 +65,7 @@ export class StateManager {
    */
   forceClean(): void {
     try {
-      if (fs.existsSync(this.statePath)) {
-        fs.unlinkSync(this.statePath);
-      }
+      fs.unlinkSync(this.statePath);
     } catch {}
   }
 }

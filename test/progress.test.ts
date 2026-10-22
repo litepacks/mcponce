@@ -7,18 +7,6 @@ import type { ToolProgressNotification } from '../src/types.js';
 describe('Real-Time Progress Reporting', () => {
   let app: McpApp;
 
-  beforeEach(() => {
-    app = createMcpServer({
-      name: 'test-progress-server',
-      version: '1.0.0',
-      port: 0
-    });
-  });
-
-  afterEach(async () => {
-    await app.stop({ force: true });
-  });
-
   describe('createProgressReporter unit tests', () => {
     it('dispatches positional arguments (progress, total, message) to onProgress listener', async () => {
       const reports: ToolProgressNotification[] = [];
@@ -152,6 +140,19 @@ describe('Real-Time Progress Reporting', () => {
   });
 
   describe('Programmatic Tool Execution (app.callTool with onProgress)', () => {
+    beforeEach(() => {
+      app = createMcpServer({
+        name: 'test-progress-server',
+        version: '1.0.0',
+        port: 0,
+        registerInCentral: false
+      });
+    });
+
+    afterEach(async () => {
+      await app.stop({ force: true });
+    });
+
     it('reports progress via context.reportProgress positional signature', async () => {
       app.tool({
         name: 'job_runner',
@@ -317,6 +318,19 @@ describe('Real-Time Progress Reporting', () => {
   });
 
   describe('Integration: Remote MCP Client calls over HTTP SSE stream', () => {
+    beforeEach(() => {
+      app = createMcpServer({
+        name: 'test-progress-server',
+        version: '1.0.0',
+        port: 0,
+        registerInCentral: false
+      });
+    });
+
+    afterEach(async () => {
+      await app.stop({ force: true });
+    });
+
     it('transmits notifications/progress events to MCP client over HTTP SSE', async () => {
       app.tool({
         name: 'long_job',

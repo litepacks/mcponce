@@ -13,8 +13,12 @@ export type AnyResourceContents = TextResourceContents | BlobResourceContents;
  * Detects common image MIME types from raw buffer magic numbers.
  */
 export function detectImageMimeType(
-  bytes: Uint8Array | Buffer | string
+  bytes: Uint8Array | Buffer | ArrayBuffer | string
 ): string | undefined {
+  if (bytes instanceof ArrayBuffer) {
+    bytes = new Uint8Array(bytes);
+  }
+
   if (typeof bytes === 'string') {
     if (bytes.startsWith('data:')) {
       const match = bytes.match(/^data:([^;]+);/);
@@ -70,9 +74,9 @@ export function detectImageMimeType(
 }
 
 /**
- * Converts a Buffer, Uint8Array, or string to a clean base64 string.
+ * Converts a Buffer, Uint8Array, ArrayBuffer, or string to a clean base64 string.
  */
-export function toBase64(data: Uint8Array | Buffer | string): string {
+export function toBase64(data: Uint8Array | Buffer | ArrayBuffer | string): string {
   if (typeof data === 'string') {
     // If it's a data URI, strip prefix
     const match = data.match(/^data:[^;]+;base64,(.+)$/s);
@@ -84,6 +88,10 @@ export function toBase64(data: Uint8Array | Buffer | string): string {
 
   if (Buffer.isBuffer(data)) {
     return data.toString('base64');
+  }
+
+  if (data instanceof ArrayBuffer) {
+    return Buffer.from(data).toString('base64');
   }
 
   if (data instanceof Uint8Array) {
@@ -233,9 +241,10 @@ export function normalizeContentItem(item: any): TextContent | ImageContent | Em
     return textContent(item);
   }
 
-  if (Buffer.isBuffer(item) || item instanceof Uint8Array) {
-    const mime = detectImageMimeType(item) || 'image/png';
-    return imageContent(item, mime).toJSON();
+  if (Buffer.isBuffer(item) || item instanceof Uint8Array || item instanceof ArrayBuffer) {
+    const raw = item instanceof ArrayBuffer ? new Uint8Array(item) : item;
+    const mime = detectImageMimeType(raw) || 'image/png';
+    return imageContent(raw, mime).toJSON();
   }
 
   if (item && typeof item === 'object') {

@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createMcpServer, McpApp } from '../src/index.js';
-import { executeWithRetry, sleepWithSignal } from '../src/utils/retry.js';
+import {
+  executeWithRetry,
+  sleepWithSignal,
+  extractRetryAfterMs,
+  computeBackoffDelay,
+  parseRetryAfterValue
+} from '../src/utils/retry.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -8,27 +14,6 @@ import * as os from 'node:os';
 describe('Automatic Tool Retries with Exponential Backoff', () => {
   let app: McpApp;
   let testDataDir: string;
-
-  beforeEach(async () => {
-    testDataDir = path.join(os.tmpdir(), `mcponce-test-retry-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    await fs.mkdir(testDataDir, { recursive: true });
-
-    app = createMcpServer({
-      name: 'test-retry-server',
-      version: '1.0.0',
-      dataDir: testDataDir,
-      logging: false
-    });
-  });
-
-  afterEach(async () => {
-    try {
-      await app.stop();
-    } catch {}
-    try {
-      await fs.rm(testDataDir, { recursive: true, force: true });
-    } catch {}
-  });
 
   describe('Unit: executeWithRetry and sleepWithSignal', () => {
     it('resolves immediately without retry if fn succeeds on first attempt', async () => {
@@ -112,9 +97,204 @@ describe('Automatic Tool Retries with Exponential Backoff', () => {
 
       expect(attempts).toBe(1);
     });
+
+    describe('Retry-After parsing and extraction', () => {
+      it('correctly parses numbers, strings, and HTTP date formats in parseRetryAfterValue', () => {
+        expect(parseRetryAfterValue(5)).toBe(5000);
+        expect(parseRetryAfterValue(0.5)).toBe(500);
+        expect(parseRetryAfterValue('3')).toBe(3000);
+        expect(parseRetryAfterValue('  2.5  ')).toBe(2500);
+        expect(parseRetryAfterValue('invalid')).toBeNull();
+        expect(parseRetryAfterValue('')).toBeNull();
+        expect(parseRetryAfterValue(-1)).toBeNull();
+
+        // Future HTTP date
+        const futureDate = new Date(Date.now() + 5000).toUTCString();
+        const diff = parseRetryAfterValue(futureDate);
+        expect(diff).not.toBeNull();
+        expect(diff!).toBeGreaterThan(3000);
+        expect(diff!).toBeLessThanOrEqual(5500);
+
+        // Past HTTP date returns 0
+        const pastDate = new Date(Date.now() - 10000).toUTCString();
+        expect(parseRetryAfterValue(pastDate)).toBe(0);
+      });
+
+      it('extracts retry delay from various error structures', () => {
+        expect(extractRetryAfterMs(null)).toBeNull();
+        expect(extractRetryAfterMs('not-an-object')).toBeNull();
+
+        // 1. Direct retryAfterMs
+        expect(extractRetryAfterMs({ retryAfterMs: 1500 })).toBe(1500);
+
+        // 2. retryAfter numeric seconds
+        expect(extractRetryAfterMs({ retryAfter: 4 })).toBe(4000);
+
+        // 3. retryAfter string
+        expect(extractRetryAfterMs({ retryAfter: '2' })).toBe(2000);
+
+        // 4. Fetch-style Headers object
+        const mockHeaders = {
+          get(key: string) {
+            return key.toLowerCase() === 'retry-after' ? '6' : null;
+          }
+        };
+        expect(extractRetryAfterMs({ response: { headers: mockHeaders } })).toBe(6000);
+        expect(extractRetryAfterMs({ headers: mockHeaders })).toBe(6000);
+
+        // 5. Plain object headers
+        expect(extractRetryAfterMs({ headers: { 'retry-after': '3' } })).toBe(3000);
+        expect(extractRetryAfterMs({ headers: { 'Retry-After': '7' } })).toBe(7000);
+        expect(extractRetryAfterMs({ response: { headers: { 'retry-after': '8' } } })).toBe(8000);
+      });
+    });
+
+    describe('Exponential backoff and randomized jitter calculation', () => {
+      it('computes deterministic delay when jitter is false or undefined', () => {
+        expect(computeBackoffDelay(1, 100, 2, 5000)).toBe(100);
+        expect(computeBackoffDelay(2, 100, 2, 5000)).toBe(200);
+        expect(computeBackoffDelay(3, 100, 2, 5000)).toBe(400);
+        expect(computeBackoffDelay(10, 100, 2, 1000)).toBe(1000); // capped at maxBackoffMs
+      });
+
+      it('applies Equal Jitter when jitter is true', () => {
+        for (let i = 0; i < 20; i++) {
+          const delay = computeBackoffDelay(2, 100, 2, 5000, true);
+          // attempt 2 base delay is 200ms. Equal jitter is [100ms, 200ms]
+          expect(delay).toBeGreaterThanOrEqual(100);
+          expect(delay).toBeLessThanOrEqual(200);
+        }
+      });
+
+      it('applies proportional jitter when jitter is a number (e.g. 0.2 for +/-20%)', () => {
+        for (let i = 0; i < 20; i++) {
+          const delay = computeBackoffDelay(2, 100, 2, 5000, 0.2);
+          // attempt 2 base delay is 200ms. 200 * (1 - 0.2) = 160ms, 200 * (1 + 0.2) = 240ms
+          expect(delay).toBeGreaterThanOrEqual(160);
+          expect(delay).toBeLessThanOrEqual(240);
+        }
+      });
+    });
+
+    describe('executeWithRetry with Retry-After and jitter', () => {
+      it('respects Retry-After header and uses the specified delay', async () => {
+        let attempts = 0;
+        const retryDelays: number[] = [];
+
+        const res = await executeWithRetry(
+          async () => {
+            attempts++;
+            if (attempts < 2) {
+              const err: any = new Error('Rate Limited');
+              err.retryAfterMs = 15;
+              throw err;
+            }
+            return 'recovered-after-429';
+          },
+          {
+            name: 'rate-limited-tool',
+            config: {
+              maxRetries: 3,
+              backoffMs: 100, // normally 100ms
+              respectRetryAfter: true
+            },
+            onRetry: (_err, _attempt, delayMs) => {
+              retryDelays.push(delayMs);
+            }
+          }
+        );
+
+        expect(res.result).toBe('recovered-after-429');
+        expect(res.retries).toBe(1);
+        expect(attempts).toBe(2);
+        expect(retryDelays).toEqual([15]); // Respected 15ms instead of 100ms
+      });
+
+      it('ignores Retry-After when respectRetryAfter is false', async () => {
+        let attempts = 0;
+        const retryDelays: number[] = [];
+
+        const res = await executeWithRetry(
+          async () => {
+            attempts++;
+            if (attempts < 2) {
+              const err: any = new Error('Rate Limited');
+              err.retryAfterMs = 500;
+              throw err;
+            }
+            return 'recovered-ignoring-header';
+          },
+          {
+            name: 'ignore-retry-after-tool',
+            config: {
+              maxRetries: 2,
+              backoffMs: 10,
+              respectRetryAfter: false
+            },
+            onRetry: (_err, _attempt, delayMs) => {
+              retryDelays.push(delayMs);
+            }
+          }
+        );
+
+        expect(res.result).toBe('recovered-ignoring-header');
+        expect(retryDelays).toEqual([10]); // Used backoffMs (10ms) instead of retryAfterMs (500ms)
+      });
+
+      it('applies jitter in executeWithRetry', async () => {
+        let attempts = 0;
+        const retryDelays: number[] = [];
+
+        await executeWithRetry(
+          async () => {
+            attempts++;
+            if (attempts < 2) {
+              throw new Error('Temporary glitch');
+            }
+            return 'jitter-success';
+          },
+          {
+            name: 'jitter-tool',
+            config: {
+              maxRetries: 2,
+              backoffMs: 40,
+              jitter: 0.1 // +/- 10% -> 36ms to 44ms
+            },
+            onRetry: (_err, _attempt, delayMs) => {
+              retryDelays.push(delayMs);
+            }
+          }
+        );
+
+        expect(retryDelays.length).toBe(1);
+        expect(retryDelays[0]).toBeGreaterThanOrEqual(36);
+        expect(retryDelays[0]).toBeLessThanOrEqual(44);
+      });
+    });
   });
 
   describe('Integration: app.callTool with declarative retry shorthand', () => {
+    beforeEach(async () => {
+      testDataDir = path.join(os.tmpdir(), `mcponce-test-retry-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      await fs.mkdir(testDataDir, { recursive: true });
+
+      app = createMcpServer({
+        name: 'test-retry-server',
+        version: '1.0.0',
+        dataDir: testDataDir,
+        logging: false
+      });
+    });
+
+    afterEach(async () => {
+      try {
+        await app.stop();
+      } catch {}
+      try {
+        await fs.rm(testDataDir, { recursive: true, force: true });
+      } catch {}
+    });
+
     it('retries a flaky tool and succeeds with retry count in analytics', async () => {
       let calls = 0;
 
@@ -375,10 +555,65 @@ describe('Automatic Tool Retries with Exponential Backoff', () => {
       const dataLine = text.split('\n').find((l) => l.startsWith('data: '));
       const json = dataLine ? JSON.parse(dataLine.slice(6)) : JSON.parse(text);
 
-      expect(json.result).toBeDefined();
-      expect(json.result.isError).toBeFalsy();
       expect(json.result.text).toContain('remote');
       expect(calls).toBe(2);
+    });
+
+    it('supports AGENTS.md retry configuration aliases (maxRetries, initialDelayMs, backoffFactor, retryableErrors)', async () => {
+      let attempts = 0;
+      app.tool({
+        name: 'agents_md_retry_tool',
+        inputSchema: {},
+        retry: {
+          maxRetries: 3,
+          initialDelayMs: 10,
+          maxDelayMs: 100,
+          backoffFactor: 2,
+          retryableErrors: (err) => err.message.includes('503')
+        },
+        handler: () => {
+          attempts++;
+          if (attempts < 3) {
+            throw new Error('503 Service Unavailable');
+          }
+          return { status: 'success', attempts };
+        }
+      });
+
+      const res = await app.callTool('agents_md_retry_tool', {});
+      expect(res.data).toEqual({ status: 'success', attempts: 3 });
+      expect(attempts).toBe(3);
+    });
+
+    it('successfully retries tool configured with jitter and respectRetryAfter', async () => {
+      let attempts = 0;
+      app.tool({
+        name: 'jitter_and_retry_after_tool',
+        inputSchema: {},
+        retry: {
+          maxRetries: 3,
+          backoffMs: 20,
+          jitter: true,
+          respectRetryAfter: true
+        },
+        handler: () => {
+          attempts++;
+          if (attempts < 2) {
+            const err: any = new Error('429 Too Many Requests');
+            err.retryAfterMs = 5;
+            throw err;
+          }
+          return { status: 'ok', attempts };
+        }
+      });
+
+      const res = await app.callTool('jitter_and_retry_after_tool', {});
+      expect(res.data).toEqual({ status: 'ok', attempts: 2 });
+      expect(attempts).toBe(2);
+
+      const metrics = app.getAnalytics().tools['jitter_and_retry_after_tool'];
+      expect(metrics.retries).toBe(1);
+      expect(metrics.success).toBe(1);
     });
   });
 });

@@ -59,7 +59,7 @@ export function coerceObject(val: any): any {
 }
 
 /**
- * Coerces stringified JSON arrays or single scalar values into arrays.
+ * Coerces stringified JSON arrays, comma-separated lists, or single scalar values into arrays.
  */
 export function coerceArray(val: any): any {
   if (Array.isArray(val)) {
@@ -72,6 +72,9 @@ export function coerceArray(val: any): any {
         return parsed;
       }
     } catch {}
+    if (val.includes(',')) {
+      return val.split(',').map((s) => s.trim());
+    }
     // If not JSON array, wrap single non-empty string as a single-element array
     return [val];
   }
@@ -95,9 +98,19 @@ export function coerceString(val: any): any {
 /**
  * Coerces a single value based on target property type.
  */
-export function smartCoerceValue(val: any, targetType: InputSchemaPropertyType): any {
-  switch (targetType) {
+export function smartCoerceValue(val: any, targetType: InputSchemaPropertyType | string): any {
+  if (typeof targetType !== 'string') return val;
+
+  const isOptional = targetType.endsWith('?');
+  const cleanType = (isOptional ? targetType.slice(0, -1) : targetType).toLowerCase();
+
+  if (isOptional && (val === undefined || val === null)) {
+    return val;
+  }
+
+  switch (cleanType) {
     case 'number':
+    case 'integer':
       return coerceNumber(val);
     case 'boolean':
       return coerceBoolean(val);
@@ -107,6 +120,19 @@ export function smartCoerceValue(val: any, targetType: InputSchemaPropertyType):
       return coerceObject(val);
     case 'array':
       return coerceArray(val);
+    case 'string[]': {
+      const arr = coerceArray(val);
+      return Array.isArray(arr) ? arr.map(coerceString) : arr;
+    }
+    case 'number[]':
+    case 'integer[]': {
+      const arr = coerceArray(val);
+      return Array.isArray(arr) ? arr.map(coerceNumber) : arr;
+    }
+    case 'boolean[]': {
+      const arr = coerceArray(val);
+      return Array.isArray(arr) ? arr.map(coerceBoolean) : arr;
+    }
     default:
       return val;
   }
@@ -118,23 +144,67 @@ export function smartCoerceValue(val: any, targetType: InputSchemaPropertyType):
  * is preserved for clean LLM tool advertising.
  */
 export function buildCoercedZodSchema(
-  type: InputSchemaPropertyType,
+  type: InputSchemaPropertyType | string,
   baseSchema?: z.ZodTypeAny
 ): z.ZodTypeAny {
-  switch (type) {
+  const isOptional = typeof type === 'string' && type.endsWith('?');
+  const cleanType = (isOptional ? type.slice(0, -1) : type).toLowerCase();
+
+  let schema: z.ZodTypeAny;
+  switch (cleanType) {
     case 'number':
-      return z.preprocess(coerceNumber, baseSchema || z.number());
+    case 'integer':
+      schema = z.preprocess(coerceNumber, baseSchema || z.number());
+      break;
     case 'boolean':
-      return z.preprocess(coerceBoolean, baseSchema || z.boolean());
+      schema = z.preprocess(coerceBoolean, baseSchema || z.boolean());
+      break;
     case 'string':
-      return z.preprocess(coerceString, baseSchema || z.string());
+      schema = z.preprocess(coerceString, baseSchema || z.string());
+      break;
     case 'object':
-      return z.preprocess(coerceObject, baseSchema || z.record(z.any()));
+      schema = z.preprocess(coerceObject, baseSchema || z.record(z.any()));
+      break;
     case 'array':
-      return z.preprocess(coerceArray, baseSchema || z.array(z.any()));
+      schema = z.preprocess(coerceArray, baseSchema || z.array(z.any()));
+      break;
+    case 'string[]':
+      schema = z.preprocess(
+        (v) => {
+          if (v === undefined || v === null) return v;
+          const a = coerceArray(v);
+          return Array.isArray(a) ? a.map(coerceString) : a;
+        },
+        baseSchema || z.array(z.string())
+      );
+      break;
+    case 'number[]':
+    case 'integer[]':
+      schema = z.preprocess(
+        (v) => {
+          if (v === undefined || v === null) return v;
+          const a = coerceArray(v);
+          return Array.isArray(a) ? a.map(coerceNumber) : a;
+        },
+        baseSchema || z.array(z.number())
+      );
+      break;
+    case 'boolean[]':
+      schema = z.preprocess(
+        (v) => {
+          if (v === undefined || v === null) return v;
+          const a = coerceArray(v);
+          return Array.isArray(a) ? a.map(coerceBoolean) : a;
+        },
+        baseSchema || z.array(z.boolean())
+      );
+      break;
     default:
-      return baseSchema || z.any();
+      schema = baseSchema || z.any();
+      break;
   }
+
+  return isOptional ? schema.optional() : schema;
 }
 
 /**
@@ -146,10 +216,21 @@ export function coerceArguments(
 ): Record<string, any> {
   if (!args || !inputSchema) return args || {};
 
+  let effectiveProps: Record<string, any> = inputSchema;
+  if (
+    inputSchema instanceof z.ZodObject ||
+    (typeof inputSchema === 'object' && '_def' in inputSchema && 'shape' in inputSchema)
+  ) {
+    effectiveProps =
+      typeof (inputSchema as any).shape === 'function'
+        ? (inputSchema as any).shape()
+        : (inputSchema as any).shape;
+  }
+
   const coerced: Record<string, any> = { ...args };
 
   for (const [key, val] of Object.entries(args)) {
-    const propDef = inputSchema[key];
+    const propDef = effectiveProps[key];
     if (!propDef) continue;
 
     if (typeof propDef === 'string') {
@@ -158,7 +239,11 @@ export function coerceArguments(
       if (typeof propDef.type === 'string') {
         coerced[key] = smartCoerceValue(val, propDef.type.toLowerCase() as InputSchemaPropertyType);
       } else if ('_def' in propDef) {
-        const typeName = propDef._def?.typeName;
+        let currentDef = propDef;
+        while (currentDef?._def?.innerType) {
+          currentDef = currentDef._def.innerType;
+        }
+        const typeName = currentDef._def?.typeName;
         if (typeName === 'ZodNumber') {
           coerced[key] = coerceNumber(val);
         } else if (typeName === 'ZodBoolean') {
@@ -166,7 +251,21 @@ export function coerceArguments(
         } else if (typeName === 'ZodString') {
           coerced[key] = coerceString(val);
         } else if (typeName === 'ZodArray') {
-          coerced[key] = coerceArray(val);
+          const arr = coerceArray(val);
+          let inner = currentDef._def?.type;
+          while (inner?._def?.innerType) {
+            inner = inner._def.innerType;
+          }
+          const innerType = inner?._def?.typeName;
+          if (innerType === 'ZodNumber') {
+            coerced[key] = Array.isArray(arr) ? arr.map(coerceNumber) : arr;
+          } else if (innerType === 'ZodBoolean') {
+            coerced[key] = Array.isArray(arr) ? arr.map(coerceBoolean) : arr;
+          } else if (innerType === 'ZodString') {
+            coerced[key] = Array.isArray(arr) ? arr.map(coerceString) : arr;
+          } else {
+            coerced[key] = arr;
+          }
         } else if (typeName === 'ZodObject' || typeName === 'ZodRecord') {
           coerced[key] = coerceObject(val);
         }

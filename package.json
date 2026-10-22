@@ -1,6 +1,6 @@
 {
   "name": "mcponce",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Cross-platform single-executable MCP server framework powered by Hono and the official Model Context Protocol SDK",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -52,11 +52,12 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.9",
-    "@vitest/coverage-v8": "^3.2.7",
+    "@vitest/coverage-v8": ">=5.0.5",
     "docboot": "^0.3.0",
+    "softscope": "^0.3.2",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.8"
+    "vitest": ">=4.1.12"
   },
   "engines": {
     "node": ">=20.0.0"
